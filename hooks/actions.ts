@@ -6,6 +6,7 @@ import type { EngineInterface } from 'claude-code'
 import type { Task } from '../types'
 import { errText } from './cli'
 import { delegate } from './delegation'
+import { allowProjectRead, allowWrite } from './permissions'
 import { provider } from './registry'
 import { compare, runRequest, usageLine } from './requests'
 import type { RequestResult } from './requests'
@@ -16,38 +17,6 @@ import { setUi, DEFAULT_SETTINGS } from './state'
 // state this file reads (the scan needs each atom declared in the file that uses it)
 const cwd = atom({ plugin: 'ai-subscriptions', key: 'cwd' } as const, '', { shape: 'cwd-1' })
 const settings = atom({ plugin: 'ai-subscriptions', key: 'settings' } as const, DEFAULT_SETTINGS, { shape: 'st-1' })
-
-/** Project folders the person allowed a provider to read for this session. */
-const readGrants = new Set<string>()
-
-/** Asks the person in the engine's own dialog; a dismissed dialog is a no. */
-async function confirm($: EngineInterface, question: string, options: string[]): Promise<string | undefined> {
-  try {
-    return await $.ui.ask(question, { options, header: 'AI Hub' })
-  } catch {
-    return undefined
-  }
-}
-
-export async function allowProjectRead($: EngineInterface, providerId: string, dir: string): Promise<boolean> {
-  if (!(await read($, settings)).confirmProjectAccess) return true
-  const grant = `${providerId}|${dir.toLowerCase()}`
-  if (readGrants.has(grant)) return true
-  const label = provider(providerId)?.label ?? providerId
-  const answer = await confirm($, `Let ${label} read the files in ${dir}? Their contents go to that provider.`, [
-    'Allow once',
-    'Allow this session',
-    'Deny',
-  ])
-  if (answer === 'Allow this session') readGrants.add(grant)
-  return answer === 'Allow once' || answer === 'Allow this session'
-}
-
-export async function allowWrite($: EngineInterface, providerId: string, dir: string, how: string): Promise<boolean> {
-  const label = provider(providerId)?.label ?? providerId
-  const answer = await confirm($, `Let ${label} change files in ${dir} (${how})? Nothing is committed.`, ['Allow', 'Deny'])
-  return answer === 'Allow'
-}
 
 export const header = (r: RequestResult): string =>
   `[${r.provider}${r.model ? ` · ${r.model}` : ''}${r.effort ? ` · ${r.effort}` : ''}${r.ms ? ` · ${(r.ms / 1000).toFixed(1)}s` : ''}]`
@@ -94,7 +63,7 @@ export async function askTool(
     return { isOk: false, text: 'The person declined project access: nothing was sent.' }
   }
   const r = await askWithFallback($, { provider: providerId, model, effort }, a.prompt, a.task, a.cwd)
-  const via = `${why ? `\n(${why})` : ''}${r.tried.length > 1 ? `\n(fell back after: ${r.tried.slice(0, -1).join(', ')})` : ''}`
+  const via = `${why ? `\n(${why})` : ''}${r.tried.length > 1 ? `\n(fell back after: ${r.tried.slice(0, -1).join(', ')})` : ''}${r.declined ? `\n(the person declined to let ${provider(r.declined)?.label ?? r.declined} read the project, so nothing was sent to it)` : ''}`
   return {
     isOk: r.isOk,
     text: `${header(r)}\n${r.text}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}${via}`,

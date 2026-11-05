@@ -1,5 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 
+import { canonicalDir } from '../hooks/permissions'
+import { DEFAULT_SETTINGS } from '../hooks/state'
+
 declare function setTimeout(fn: () => void, ms: number): unknown
 const settle = (ms = 30) => new Promise<void>(r => void setTimeout(r, ms))
 
@@ -34,6 +37,10 @@ type World = {
   /** OpenCode prints a session id and records a cost on it */
   withSession?: boolean
   os?: 'mac'
+  /** what $.session.id() answers */
+  session?: string
+  /** answers to the next questions, in order; then `answer` */
+  answers?: string[]
 }
 
 /** reads a PowerShell -EncodedCommand back into its script (UTF-16LE, base64) */
@@ -74,6 +81,7 @@ function engine(on: any, w: World) {
     return { value: undefined }
   })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: w.session ?? 's1' }))
   on('store.get', (_: unknown, e: { key: string }) => ({ value: w.store[e.key] }))
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
     w.store[e.key] = JSON.parse(JSON.stringify(e.value))
@@ -108,7 +116,7 @@ function engine(on: any, w: World) {
   on('tool.call', { tool: 'AskUserQuestion' }, (_: unknown, e: { questions: { question: string }[] }) => {
     const q = e.questions[0]?.question ?? ''
     w.asked.push(q)
-    return { result: { questions: e.questions, answers: { [q]: w.answer } } }
+    return { result: { questions: e.questions, answers: { [q]: w.answers?.shift() ?? w.answer } } }
   })
   on('process.run', (_: unknown, e: { argv: string[]; init?: { cwd?: string; env?: Record<string, string>; stdin?: string } }) => {
     const run: Run = { argv: [...e.argv], cwd: e.init?.cwd, env: e.init?.env, stdin: e.init?.stdin }
@@ -484,4 +492,72 @@ test('on macOS keys live in the Keychain, passed on stdin, and the store keeps o
   // Codex limits without PowerShell
   expect(w.ran.some(x => x.argv[0] === 'sh' && x.argv.includes('{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}'))).toBe(true)
   expect(w.ran.some(x => x.argv[0] === 'powershell.exe')).toBe(false)
+})
+
+const FALLBACK = () => ({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, fallback: true, maxFallbacks: 1 } })
+
+test('a fallback provider gets the project only with its own yes; a no sends it nothing', async ($, on) => {
+  const w = world(FALLBACK())
+  w.execOk = false
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+
+  w.answers = ['Allow once', 'Deny']
+  const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'secret plan', cwd: 'C:\\proj' } as never)
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[1]).toContain('DeepSeek')
+  expect(w.ran.some(x => x.argv[1] === 'run')).toBe(false)
+  expect(JSON.stringify(r)).toContain('declined to let')
+
+  w.answers = ['Allow once', 'Allow once']
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'secret plan 2', cwd: 'C:\\proj' } as never)
+  const run = w.ran.find(x => x.argv[1] === 'run')
+  expect(run?.cwd).toBe('C:\\proj')
+})
+
+test('a session grant stays in its session, and folders keep their case on Linux', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+
+  w.answer = 'Allow this session'
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'a', cwd: 'C:\\proj' } as never)
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'b', cwd: 'c:/PROJ/' } as never)
+  expect(w.asked.length).toBe(1)
+
+  w.session = 's2'
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answer = 'Deny'
+  const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'c', cwd: 'C:\\proj' } as never)
+  expect(w.asked.length).toBe(2)
+  expect(JSON.stringify(r)).toContain('declined')
+
+  expect(canonicalDir('linux', '/home/A/')).toBe('/home/A')
+  expect(canonicalDir('linux', '/home/A')).not.toBe(canonicalDir('linux', '/home/a'))
+  expect(canonicalDir('windows', 'C:/Proj\\')).toBe('c:\\proj')
+  expect(canonicalDir('windows', 'C:\\')).toBe('c:\\')
+})
+
+test('writes never share a run, and a different task is its own request', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+
+  const before = w.ran.filter(x => x.argv[1] === 'exec').length
+  w.answer = 'Allow'
+  const write = () => $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'edit', mode: 'write' } as never)
+  await Promise.all([write(), write()])
+  expect(w.ran.filter(x => x.argv[1] === 'exec').length - before).toBe(2)
+
+  const ask = (task: string) => $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', task, prompt: 'same' } as never)
+  await Promise.all([ask('code'), ask('reasoning')])
+  expect(w.ran.filter(x => x.argv[1] === 'exec').length - before).toBe(4)
+})
+
+test('connecting sends no test prompt unless the person turned that on', async () => {
+  expect(DEFAULT_SETTINGS.verifyOnConnect).toBe(false)
 })

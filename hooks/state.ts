@@ -24,7 +24,8 @@ export const DEFAULT_SETTINGS: Settings = {
   maxFallbacks: 1,
   confirmProjectAccess: true,
   recordPreviews: false,
-  verifyOnConnect: true,
+  // a test request is a real prompt that uses the plan or the API balance: off until the person turns it on
+  verifyOnConnect: false,
   retentionCount: 100,
   retentionDays: 30,
   useProjectProfile: false,

@@ -191,7 +191,7 @@ const AR: Record<string, string> = {
   'at most': 'بحد أقصى',
   'ask before a provider reads project files': 'اسأل قبل ما provider يقرا ملفات المشروع',
   'keep redacted prompt previews': 'احتفظ بمعاينات للـ prompts متخبّي منها الأسرار',
-  'test right after connecting': 'اختبر على طول بعد التوصيل',
+  'test right after connecting (sends one real prompt)': 'اختبر على طول بعد التوصيل (بيبعت طلب حقيقي واحد)',
   'alert me near a provider’s limit': 'نبّهني لما provider يقرب من حده',
   'a toast at 80% and 95% of a window the provider reports, and when it reports a block.': 'تنبيه عند 80% و95% من أي حد الـ provider بيعلنه، ولما يعلن إنه اتقفل.',
   '🔒 changing files always asks first. read-only requests run in an empty folder.': '🔒 تغيير الملفات دايماً بيسأل الأول. طلبات القراية بتشتغل في فولدر فاضي.',

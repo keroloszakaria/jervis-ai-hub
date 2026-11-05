@@ -9,6 +9,7 @@ import { begin, finish, redact } from './activity'
 import { revealForRequest } from './auth'
 import { MAX_ARG_PROMPT, TIMEOUT, errText, exe, invocation, parse, parseOpencodeExport, sandboxDir } from './cli'
 import { resolveModel } from './models'
+import { sessionKey } from './permissions'
 import { provider } from './registry'
 import { setHealth } from './state'
 
@@ -44,12 +45,6 @@ export type RequestArgs = {
 /** Identical requests in flight share one run, so a double press or a retried tool call sends nothing twice. */
 const inFlight = new Map<string, Promise<RequestResult>>()
 
-function hash(s: string): string {
-  let h = 5381
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
-  return (h >>> 0).toString(36)
-}
-
 /** Whether a provider may take a request now: connected, on, installed and signed in. */
 export async function readiness($: EngineInterface, id: string): Promise<string | undefined> {
   const p = provider(id)
@@ -64,8 +59,11 @@ export async function readiness($: EngineInterface, id: string): Promise<string 
 }
 
 export async function runRequest($: EngineInterface, a: RequestArgs): Promise<RequestResult> {
-  const key = `${a.providerId}|${a.model ?? ''}|${a.effort ?? ''}|${a.mode}|${a.cwd ?? ''}|${a.type}|${hash(a.prompt)}`
-  const running = inFlight.get(key)
+  // Only a read from the same session, with the same provider, model, effort,
+  // folder, task and the exact same prompt shares a run already under way. The
+  // key lives in memory only while that run lasts; a write never shares one.
+  const key = JSON.stringify([await sessionKey($), a.providerId, a.model ?? '', a.effort ?? '', a.mode, a.cwd ?? '', a.type, a.task ?? '', a.prompt])
+  const running = a.mode === 'read' ? inFlight.get(key) : undefined
   if (running) return running
   const job = execute($, a).finally(() => inFlight.delete(key))
   inFlight.set(key, job)

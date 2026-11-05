@@ -11,6 +11,7 @@ import { protectLegacyKey } from './auth'
 import { checkAllAuth, connect } from './health'
 import { refreshAllLimits, refreshClaudeLimits } from './limits'
 import { refreshModels } from './models'
+import { forgetOtherSessions, sessionKey } from './permissions'
 import { PROVIDERS, TASKS, provider } from './registry'
 import { STORE, loadPersisted, saveConfig } from './state'
 import { BG, renderPane } from './ui'
@@ -158,6 +159,8 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const ran = await next(e)
+    // project-read grants never outlive the session that gave them
+    forgetOtherSessions(await sessionKey($))
     await update($, cwd, () => e.cwd)
     await loadPersisted($)
     await migrate($)

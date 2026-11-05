@@ -1322,7 +1322,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
         <Toggle
           id="verify"
           on={st.verifyOnConnect}
-          label="Test right after connecting"
+          label="Test right after connecting (sends one real prompt)"
           onPress={() => void saveSettings($, s => ({ ...s, verifyOnConnect: !s.verifyOnConnect }))}
         />
         <Toggle

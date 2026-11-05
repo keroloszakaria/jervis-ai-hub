@@ -6,6 +6,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Capability, Route, Routes, Task } from '../types'
 import { hasCapability } from './models'
+import { allowProjectRead } from './permissions'
 import { PROVIDERS } from './registry'
 import { type RequestResult, readiness, runRequest } from './requests'
 import { type SmartPick, smartPick } from './smart'
@@ -82,7 +83,9 @@ export async function route(
 /**
  * One read-only request with the person's fallback rule: on failure, at most
  * `maxFallbacks` other ready providers, each tried once. Write requests never
- * fall back: a half-done change must not be repeated elsewhere.
+ * fall back: a half-done change must not be repeated elsewhere. With a project
+ * folder, each other provider needs the person's own yes before it gets the
+ * prompt or the files; a no stops the fallback there and sends nothing.
  */
 export async function askWithFallback(
   $: EngineInterface,
@@ -90,7 +93,7 @@ export async function askWithFallback(
   prompt: string,
   task: Task | undefined,
   projectDir: string | undefined,
-): Promise<RequestResult & { tried: string[] }> {
+): Promise<RequestResult & { tried: string[]; declined?: string }> {
   const s = await read($, settings)
   const tried: string[] = []
   let r = await runRequest($, { providerId: first.provider, model: first.model, effort: first.effort, prompt, mode: 'read', cwd: projectDir, type: 'ask', task })
@@ -105,6 +108,7 @@ export async function askWithFallback(
     const best = pick ? (pick as SmartPick).route : undefined
     const model = best?.model
     const effort = best?.effort
+    if (projectDir && !(await allowProjectRead($, id, projectDir))) return { ...r, tried, declined: id }
     r = await runRequest($, { providerId: id, model, effort, prompt, mode: 'read', cwd: projectDir, type: 'ask', task, fallbackFrom: tried[tried.length - 1] })
     tried.push(id)
     if (r.isOk) break
