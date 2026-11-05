@@ -1,0 +1,5 @@
+{
+  "name": "jervis-ai-hub",
+  "owner": { "name": "keroloszakaria" },
+  "plugins": [{ "name": "ai-subscriptions", "source": "./" }]
+}

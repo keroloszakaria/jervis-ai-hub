@@ -1,0 +1,35 @@
+# Jervis AI Hub
+
+A Claude Code mod that connects your other AI subscriptions and API keys (ChatGPT through Codex, Antigravity, OpenCode, DeepSeek, OpenRouter, MiniMax and more) and lets Claude ask, compare or delegate to them.
+
+- **Pane:** providers, models with effort, each provider's limits, activity and settings, in a black, white and neon orange design.
+- **Tools for Claude:** `ask_ai`, `compare_ai` and `delegate_ai`.
+- **Smart pick:** with a task and no provider, the hub picks the best connected model and effort, using only what each source reports and each provider's remaining limits.
+- **Limits:** Codex plan windows, Antigravity `/usage`, your Claude session's windows, and the balance endpoints of DeepSeek, OpenRouter, Moonshot and SiliconFlow. Nothing is estimated.
+- **Security:** API keys are typed into a masked Windows dialog and stored encrypted with Windows DPAPI; they are never shown, logged or stored in plain text.
+
+Windows only (DPAPI and the key dialog). The providers' own CLIs (`codex`, `agy`, `opencode`) must be installed and signed in for the subscriptions you connect.
+
+## Install
+
+At the prompt of a terminal session:
+
+```
+/plugin install ai-subscriptions --marketplace keroloszakaria/jervis-ai-hub
+```
+
+Answer `y` to add the marketplace, then pick the user scope. From a shell:
+
+```bash
+claude plugin install ai-subscriptions --marketplace keroloszakaria/jervis-ai-hub
+```
+
+In the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `keroloszakaria/jervis-ai-hub`, then Add plugin.
+
+This repository is private: installing needs read access to it on GitHub and a git credential for github.com on your machine (an SSH key, or `gh auth login` then `gh auth setup-git`).
+
+Open the pane with `/ai-providers`.
+
+## Licenses
+
+Provider logos come from lobe-icons (MIT); see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
