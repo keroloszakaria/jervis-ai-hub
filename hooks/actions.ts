@@ -1,4 +1,4 @@
-// What the tools and the pane's quick actions do, with the confirmations that
+// What the tools do, with the confirmations that
 // guard project access and changes.
 import { atom, read } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
@@ -120,37 +120,5 @@ export async function delegateTool($: EngineInterface, providerId: string, brief
     return { isOk: r.isOk, text: r.text }
   } catch (error) {
     return { isOk: false, text: `Delegation failed: ${errText(error)}` }
-  }
-}
-
-/** The pane's quick actions: the same paths as the tools, the answer shown in the pane. */
-export async function quick($: EngineInterface, kind: 'ask' | 'compare' | 'delegate', target: string, prompt: string): Promise<void> {
-  if (!prompt.trim()) return
-  let busy = false
-  await setUi($, u => {
-    busy = Boolean(u.quickBusy)
-    return busy ? u : { ...u, quickBusy: kind, quickResults: [] }
-  })
-  if (busy) return
-  try {
-    let results: { title: string; text: string; isError?: boolean }[]
-    if (kind === 'compare') {
-      // compares every ready provider (up to four); the target picker applies to Ask and Delegate
-      const r = await compareTool($, prompt)
-      results = [{ title: 'Comparison', text: r.text, isError: !r.isOk }]
-    } else if (kind === 'delegate') {
-      const id = target === 'auto' ? (await candidates($)).find(x => provider(x)?.relaySkill) : target
-      if (!id) results = [{ title: 'Delegate', text: 'No ready provider has a Jervis Relay adapter.', isError: true }]
-      else {
-        const r = await delegateTool($, id, prompt)
-        results = [{ title: `Delegated to ${provider(id)?.label ?? id}`, text: r.text, isError: !r.isOk }]
-      }
-    } else {
-      const r = await askTool($, { provider: target === 'auto' ? undefined : target, prompt, mode: 'read' })
-      results = [{ title: 'Answer', text: r.text, isError: !r.isOk }]
-    }
-    await setUi($, u => ({ ...u, quickBusy: undefined, quickResults: results, quickDraft: '', inputGen: u.inputGen + 1 }))
-  } catch (error) {
-    await setUi($, u => ({ ...u, quickBusy: undefined, quickResults: [{ title: 'Error', text: errText(error), isError: true }] }))
   }
 }

@@ -124,8 +124,6 @@ export type Settings = {
 
 export type Note = { text: string; isError?: boolean; href?: string }
 
-export type QuickResult = { title: string; text: string; isError?: boolean }
-
 export type DiagRow = { name: string; isOk: boolean; detail: string }
 
 export type Tab = 'overview' | 'models' | 'activity' | 'settings'
@@ -142,10 +140,6 @@ export type PaneUi = {
   favOnly: boolean
   selectedModel?: string
   modelLimit: number
-  quickTarget: string
-  quickDraft: string
-  quickBusy?: 'ask' | 'compare' | 'delegate'
-  quickResults: QuickResult[]
   notes: Record<string, Note>
   activityOpen?: string
   /** the Activity list's type filter */

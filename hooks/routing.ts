@@ -8,12 +8,13 @@ import type { Capability, Route, Routes, Task } from '../types'
 import { hasCapability } from './models'
 import { PROVIDERS } from './registry'
 import { type RequestResult, readiness, runRequest } from './requests'
-import { smartPick } from './smart'
+import { type SmartPick, smartPick } from './smart'
 import { DEFAULT_SETTINGS } from './state'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
 const config = atom({ plugin: 'ai-subscriptions', key: 'config' } as const, {}, { shape: 'cfg-3' })
 const cwd = atom({ plugin: 'ai-subscriptions', key: 'cwd' } as const, '', { shape: 'cwd-1' })
+const limits = atom({ plugin: 'ai-subscriptions', key: 'limits' } as const, {}, { shape: 'l-1' })
 const health = atom({ plugin: 'ai-subscriptions', key: 'health' } as const, {}, { shape: 'h-1' })
 const models = atom({ plugin: 'ai-subscriptions', key: 'models' } as const, {}, { shape: 'm-2' })
 const settings = atom({ plugin: 'ai-subscriptions', key: 'settings' } as const, DEFAULT_SETTINGS, { shape: 'st-1' })
@@ -25,14 +26,18 @@ export async function activeRoutes($: EngineInterface): Promise<{ routes: Routes
   return { routes: s.routes, profile: 'global' }
 }
 
-/** Providers that can take a request now, verified ones first. */
+/** Providers that can take a request now, verified ones first; one that reported its limit reached is left out. */
 export async function candidates($: EngineInterface): Promise<string[]> {
   const cfg = await read($, config)
   const h = await read($, health)
+  const lims = await read($, limits)
   const ready: string[] = []
   for (const p of PROVIDERS) {
     if (!cfg[p.id]?.isConnected || !cfg[p.id]?.isEnabled) continue
     if (await readiness($, p.id)) continue
+    const l = lims[p.id]
+    // reached: the provider said so, or every window it reported is spent
+    if (l?.isBlocked || (l?.windows?.length && l.windows.every(w => w.usedPercent >= 98))) continue
     ready.push(p.id)
   }
   const score = (id: string) => (h[id]?.lastTest?.isOk ? 0 : h[id]?.lastTest ? 2 : 1)
@@ -94,7 +99,13 @@ export async function askWithFallback(
   for (const id of await candidates($)) {
     if (tried.length - 1 >= s.maxFallbacks) break
     if (tried.includes(id)) continue
-    r = await runRequest($, { providerId: id, prompt, mode: 'read', cwd: projectDir, type: 'ask', task, fallbackFrom: tried[tried.length - 1] })
+    // that provider's best model for the task, skipping one whose models are all at their limit
+    const pick = s.smartRouting !== false ? await smartPick($, task ?? 'general', { only: id }) : undefined
+    if (pick && !('route' in pick)) continue
+    const best = pick ? (pick as SmartPick).route : undefined
+    const model = best?.model
+    const effort = best?.effort
+    r = await runRequest($, { providerId: id, model, effort, prompt, mode: 'read', cwd: projectDir, type: 'ask', task, fallbackFrom: tried[tried.length - 1] })
     tried.push(id)
     if (r.isOk) break
   }

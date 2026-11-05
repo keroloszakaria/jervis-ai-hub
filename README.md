@@ -30,6 +30,12 @@ This repository is private: installing needs read access to it on GitHub and a g
 
 Open the pane with `/ai-providers`.
 
+## Developing
+
+- Type checking extends `.claude-plugin/types/tsconfig.json`, which Claude Code writes the first time it loads the mod (the folder is gitignored). Load the mod once, for example with `claude --plugin-dir <this folder>`, then run `npx -p typescript tsc -p .`.
+- Tests: `claude plugin test .` and `claude plugin validate .`.
+- Don't load a development copy and the installed plugin in the same session: both register the same tools and pane.
+
 ## Licenses
 
 Provider logos come from lobe-icons (MIT); see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
