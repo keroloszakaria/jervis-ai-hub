@@ -1,11 +1,14 @@
 // AuthenticationManager: official sign-in checks, and API keys kept with the
-// operating system's own protection (Windows DPAPI, bound to this user account).
-// A key is typed into a masked Windows dialog, never into the pane, and the
-// store holds only its DPAPI ciphertext.
+// operating system's own protection: Windows DPAPI (bound to this user
+// account), the macOS Keychain, or the Linux Secret Service. A key is typed
+// into a masked system dialog, never into the pane. On Windows the store holds
+// only its DPAPI ciphertext; elsewhere it holds a marker, and the key lives in
+// the system's keyring.
 import type { EngineInterface } from 'claude-code'
 
 import type { AuthState } from '../types'
-import { clean, errText, exe } from './cli'
+import { clean, errText, exe, onPath } from './cli'
+import { type OsName, osName } from './platform'
 import type { ProviderEntry } from './registry'
 import { STORE } from './state'
 
@@ -44,8 +47,80 @@ export async function powershell(
 
 const UTF8_IO = '[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);'
 
-/** Whether DPAPI through Windows PowerShell works here. */
+/** The keyring entry's service name on macOS and Linux. */
+const SERVICE = 'jervis-ai-hub'
+/** What the store holds in place of a ciphertext when the key lives in the system keyring. */
+const MARK: Record<Exclude<OsName, 'windows'>, string> = { mac: 'keychain:v1', linux: 'secret-service:v1' }
+const isMark = (v: string | undefined): boolean => v === MARK.mac || v === MARK.linux
+
+/** `security -i` reads one command per line; values go in double quotes. */
+const q = (s: string): string => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+
+async function storeNative($: EngineInterface, os: Exclude<OsName, 'windows'>, id: string, label: string, key: string): Promise<boolean> {
+  // the key goes on stdin, never on a command line other processes can read
+  const r =
+    os === 'mac'
+      ? await $.process.run(['security', '-i'], { stdin: `add-generic-password -U -s ${SERVICE} -a ${q(id)} -l ${q(label)} -w ${q(key)}\n`, timeoutMs: 30_000 })
+      : await $.process.run(['secret-tool', 'store', `--label=${label}`, 'service', SERVICE, 'account', id], { stdin: key, timeoutMs: 30_000 })
+  return r.exitCode === 0
+}
+
+async function readNative($: EngineInterface, os: Exclude<OsName, 'windows'>, id: string): Promise<string | undefined> {
+  const r =
+    os === 'mac'
+      ? await $.process.run(['security', 'find-generic-password', '-s', SERVICE, '-a', id, '-w'], { timeoutMs: 30_000 })
+      : await $.process.run(['secret-tool', 'lookup', 'service', SERVICE, 'account', id], { timeoutMs: 30_000 })
+  const key = r.stdout.replace(/\r?\n$/, '')
+  return r.exitCode === 0 && key ? key : undefined
+}
+
+async function clearNative($: EngineInterface, os: Exclude<OsName, 'windows'>, id: string): Promise<void> {
+  await (os === 'mac'
+    ? $.process.run(['security', 'delete-generic-password', '-s', SERVICE, '-a', id], { timeoutMs: 30_000 })
+    : $.process.run(['secret-tool', 'clear', 'service', SERVICE, 'account', id], { timeoutMs: 30_000 }))
+}
+
+/** A masked system dialog for the key: osascript on macOS, zenity or kdialog on Linux. */
+async function askKeyNative(
+  $: EngineInterface,
+  os: Exclude<OsName, 'windows'>,
+  title: string,
+  label: string,
+): Promise<{ key?: string; isCancelled?: boolean; error?: string }> {
+  let argv: string[]
+  if (os === 'mac') {
+    const as = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    argv = [
+      'osascript',
+      '-e',
+      `display dialog ${as(label)} default answer "" with hidden answer with title ${as(title)} buttons {"Cancel", "Save"} default button "Save" cancel button "Cancel"`,
+      '-e',
+      'text returned of result',
+    ]
+  } else if (await onPath($, 'zenity')) {
+    argv = ['zenity', '--password', `--title=${title}`]
+  } else if (await onPath($, 'kdialog')) {
+    argv = ['kdialog', '--title', title, '--password', label]
+  } else {
+    return { error: 'no dialog tool found: install zenity or kdialog to type a key' }
+  }
+  const r = await $.process.run(argv, { timeoutMs: 10 * 60 * 1000 })
+  const key = r.stdout.replace(/\r?\n$/, '').trim()
+  if (r.exitCode !== 0 || !key) return /-128|cancel/i.test(r.stderr) || r.exitCode === 1 || !key ? { isCancelled: true } : { error: clean(r.stderr).slice(0, 200) }
+  return { key }
+}
+
+/** Whether the system's secure storage works here. */
 export async function secureStorageStatus($: EngineInterface): Promise<{ isOk: boolean; detail: string }> {
+  const os = await osName($)
+  if (os === 'mac') {
+    return (await onPath($, 'security')) ? { isOk: true, detail: 'macOS Keychain (login keychain)' } : { isOk: false, detail: 'the `security` tool is missing' }
+  }
+  if (os === 'linux') {
+    return (await onPath($, 'secret-tool'))
+      ? { isOk: true, detail: 'Secret Service through secret-tool (GNOME Keyring or KWallet)' }
+      : { isOk: false, detail: 'secret-tool is missing: install libsecret-tools (or libsecret) and a keyring' }
+  }
   try {
     const r = await powershell(
       $,
@@ -80,6 +155,25 @@ export async function promptAndStoreKey(
   // one key dialog at a time: a second would stack windows the person must hunt for
   if (dialogFor) return { isOk: false, message: `Finish the open key window for ${dialogFor} first.` }
   dialogFor = p.label
+  const os = await osName($)
+  if (os !== 'windows') {
+    let key: string | undefined
+    try {
+      const shown = `Paste your ${p.label} API key. It is kept in your ${os === 'mac' ? 'macOS Keychain' : 'system keyring'} and never shown.`
+      const got = await askKeyNative($, os, `Jervis AI Hub - ${p.label}`, shown)
+      if (got.isCancelled) return { isOk: false, message: 'Cancelled: no key was saved.' }
+      if (!got.key) return { isOk: false, message: `The key dialog failed: ${got.error ?? 'no key'}` }
+      key = got.key
+      if (!(await storeNative($, os, p.id, `Jervis AI Hub - ${p.label}`, key))) return { isOk: false, message: 'The system keyring refused the key.' }
+      await $.store.set(STORE.creds, { ...(await creds($)), [p.id]: MARK[os] })
+      return { isOk: true, message: 'Key saved in the system keyring.' }
+    } catch (error) {
+      return { isOk: false, message: `The key dialog could not open: ${errText(error)}` }
+    } finally {
+      key = undefined
+      dialogFor = undefined
+    }
+  }
   const title = `Jervis AI Hub - ${p.label}`.replace(/'/g, "''")
   const label = `Paste your ${p.label} API key. It is encrypted for your Windows account (DPAPI) and never shown.`.replace(/'/g, "''")
   const script = `${UTF8_IO}
@@ -123,6 +217,12 @@ $s | ConvertFrom-SecureString`
 
 /** Encrypts a plaintext key from an earlier version and drops the plaintext. */
 export async function protectLegacyKey($: EngineInterface, id: string, plaintext: string): Promise<boolean> {
+  const os = await osName($)
+  if (os !== 'windows') {
+    if (!(await storeNative($, os, id, `Jervis AI Hub - ${id}`, plaintext))) return false
+    await $.store.set(STORE.creds, { ...(await creds($)), [id]: MARK[os] })
+    return true
+  }
   const r = await powershell(
     $,
     `${UTF8_IO}$k = [Console]::In.ReadToEnd().Trim(); ConvertTo-SecureString $k -AsPlainText -Force | ConvertFrom-SecureString`,
@@ -140,6 +240,10 @@ export async function protectLegacyKey($: EngineInterface, id: string, plaintext
 export async function revealForRequest($: EngineInterface, id: string): Promise<string | undefined> {
   const cipher = (await creds($))[id]
   if (!cipher) return undefined
+  if (isMark(cipher)) {
+    const os = await osName($)
+    return os === 'windows' ? undefined : readNative($, os, id)
+  }
   const r = await powershell(
     $,
     `${UTF8_IO}$s = [Console]::In.ReadToEnd().Trim() | ConvertTo-SecureString; $b = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s); try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }`,
@@ -151,6 +255,10 @@ export async function revealForRequest($: EngineInterface, id: string): Promise<
 export async function forgetCredential($: EngineInterface, id: string): Promise<void> {
   const all = await creds($)
   if (!(id in all)) return
+  if (isMark(all[id])) {
+    const os = await osName($)
+    if (os !== 'windows') await clearNative($, os, id).catch(() => undefined)
+  }
   const { [id]: _drop, ...rest } = all
   await $.store.set(STORE.creds, rest)
 }
@@ -181,7 +289,7 @@ export async function checkAuth(
     }
     if (p.kind === 'opencode-key') {
       return (await hasCredential($, p.id))
-        ? { state: 'authenticated', message: 'An encrypted key is saved (not yet proof that it works).' }
+        ? { state: 'authenticated', message: 'A key is saved in secure storage (not yet proof that it works).' }
         : { state: 'missing-credential', message: 'No API key saved.' }
     }
     return { state: 'authenticated', message: 'No sign-in needed.' }

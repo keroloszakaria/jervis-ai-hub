@@ -78,6 +78,8 @@ export type Usage = {
   outputTokens?: number
   cachedTokens?: number
   reasoningTokens?: number
+  /** USD cost the CLI itself recorded for the request (OpenCode's session cost); never estimated by the hub */
+  costUsd?: number
 }
 
 export type ActivityType = 'ask' | 'compare' | 'delegate' | 'test'
@@ -111,6 +113,10 @@ export type Settings = {
   routes: Routes
   /** with no rule for a task, pick the best-fitting connected model for it */
   smartRouting?: boolean
+  /** toasts when a provider's reported window passes 80% or 95% used */
+  limitAlerts?: boolean
+  /** the pane's language; English when absent */
+  language?: 'en' | 'ar'
   fallback: boolean
   maxFallbacks: number
   confirmProjectAccess: boolean

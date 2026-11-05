@@ -12,6 +12,7 @@ import { provider } from './registry'
 import { readiness } from './requests'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
+import { homeDir, joinPath, osName, pathSep, tempDir } from './platform'
 const config = atom({ plugin: 'ai-subscriptions', key: 'config' } as const, {}, { shape: 'cfg-3' })
 const models = atom({ plugin: 'ai-subscriptions', key: 'models' } as const, {}, { shape: 'm-2' })
 
@@ -24,8 +25,7 @@ export type DelegationResult = {
 }
 
 async function skillScript($: EngineInterface, skill: string): Promise<string | undefined> {
-  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
-  const path = `${home}\\.claude\\skills\\${skill}\\scripts\\relay.mjs`
+  const path = joinPath(await osName($), await homeDir($), '.claude', 'skills', skill, 'scripts', 'relay.mjs')
   try {
     return (await $.fs.exists(path)) ? path : undefined
   } catch {
@@ -62,9 +62,9 @@ export async function delegate(
   const node = await onPath($, 'node')
   if (!script || !node) return { isOk: false, text: (await delegationSupport($, id)).detail }
 
-  const temp = (await $.env.get('TEMP')) ?? '.'
+  const os = await osName($)
   const stamp = await $.clock.now()
-  const briefPath = `${temp}\\jervis-ai-hub\\briefs\\brief-${stamp}.md`
+  const briefPath = joinPath(os, await tempDir($), 'jervis-ai-hub', 'briefs', `brief-${stamp}.md`)
   const guard =
     '\n\nRules from the orchestrator: do not commit, do not push, keep changes inside this repository, and report what you changed.\n'
   await $.fs.write(briefPath, brief + guard)
@@ -72,7 +72,8 @@ export async function delegate(
   // The relay finds the CLI on PATH; a stale shim there must not shadow the working build.
   const cli = await exe($, p.kind)
   const pathVar = (await $.env.get('PATH')) ?? (await $.env.get('Path')) ?? ''
-  const env = cli ? { PATH: `${dirOf(cli)};${pathVar}`, Path: `${dirOf(cli)};${pathVar}` } : undefined
+  const sep = pathSep(os)
+  const env = cli ? { PATH: `${dirOf(cli)}${sep}${pathVar}`, ...(os === 'windows' ? { Path: `${dirOf(cli)}${sep}${pathVar}` } : {}) } : undefined
   const c = (await read($, config))[id]
   const pick = resolveModel((await read($, models))[id]?.models, c?.model, c?.effort)
   // the relay takes a model id only: an effort the CLI encodes in the id (Antigravity) goes through it

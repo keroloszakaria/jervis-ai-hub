@@ -11,7 +11,7 @@ export const STORE = {
   settings: 'hub-settings-v1',
   activity: 'hub-activity-v1',
   models: 'hub-models-v2',
-  /** DPAPI ciphertexts, never plaintext */
+  /** DPAPI ciphertexts (Windows) or keyring markers (macOS, Linux), never plaintext */
   creds: 'hub-creds-dpapi-v1',
   // earlier versions, read once for migration
   legacyConfig: 'config-v2',

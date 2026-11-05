@@ -2,9 +2,10 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { Kind, Mode, Usage } from '../types'
+import { homeDir, joinPath, osName, tempDir } from './platform'
 
 export const TIMEOUT = 10 * 60 * 1000
-/** Windows caps a command line near 32k characters; agy takes its prompt as an argument. */
+/** Windows caps a command line near 32k characters (and other systems cap it too); agy takes its prompt as an argument. */
 export const MAX_ARG_PROMPT = 30_000
 
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
@@ -41,6 +42,21 @@ export async function onPath($: EngineInterface, name: string): Promise<string |
 
 /** Where a kind's CLI lives on this machine, or undefined when it is not installed. */
 export async function exe($: EngineInterface, kind: Kind): Promise<string | undefined> {
+  const os = await osName($)
+  if (os !== 'windows') {
+    // the official installers' homes, then Homebrew and the usual bins, then PATH
+    const home = await homeDir($)
+    const name = kind === 'codex' ? 'codex' : kind === 'agy' ? 'agy' : 'opencode'
+    const own: Record<string, string[]> = {
+      codex: os === 'mac' ? ['/Applications/Codex.app/Contents/Resources/codex'] : [],
+      agy: [`${home}/.agy/bin/agy`],
+      opencode: [`${home}/.opencode/bin/opencode`],
+    }
+    return (
+      (await firstExisting($, [...(own[name] ?? []), `${home}/.local/bin/${name}`, `/opt/homebrew/bin/${name}`, `/usr/local/bin/${name}`, `/usr/bin/${name}`])) ??
+      onPath($, name)
+    )
+  }
   const local = (await $.env.get('LOCALAPPDATA')) ?? ''
   if (kind === 'codex') {
     const bin = `${local}\\OpenAI\\Codex\\bin`
@@ -64,11 +80,12 @@ export const dirOf = (path: string): string => path.replace(/[\\/][^\\/]*$/, '')
 
 /** An empty folder the read-only requests run in, so no agent reads project files unasked. */
 export async function sandboxDir($: EngineInterface): Promise<string> {
-  const temp = (await $.env.get('TEMP')) ?? (await $.env.get('TMPDIR')) ?? '.'
-  const dir = `${temp}\\jervis-ai-hub\\sandbox`
+  const os = await osName($)
+  const dir = joinPath(os, await tempDir($), 'jervis-ai-hub', 'sandbox')
   try {
-    if (!(await $.fs.exists(`${dir}\\README.txt`))) {
-      await $.fs.write(`${dir}\\README.txt`, 'Jervis AI Hub runs read-only requests here so no project files are read.\n')
+    const readme = joinPath(os, dir, 'README.txt')
+    if (!(await $.fs.exists(readme))) {
+      await $.fs.write(readme, 'Jervis AI Hub runs read-only requests here so no project files are read.\n')
     }
   } catch {
     // the CLI then runs wherever the process starts
@@ -104,7 +121,27 @@ export function invocation(
   }
 }
 
-export type Parsed = { isOk: boolean; text: string; usage?: Usage; error?: string }
+/** Reads the tokens and cost OpenCode recorded for one session (`opencode session export <id>`). */
+export function parseOpencodeExport(stdout: string): Usage | undefined {
+  try {
+    const info = (JSON.parse(stdout) as { info?: Record<string, unknown> }).info
+    if (!info) return undefined
+    const n = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+    const t = (info.tokens ?? {}) as Record<string, unknown>
+    const cache = (t.cache ?? {}) as Record<string, unknown>
+    return {
+      inputTokens: n(t.input),
+      outputTokens: n(t.output),
+      cachedTokens: n(cache.read),
+      reasoningTokens: n(t.reasoning),
+      costUsd: n(info.cost),
+    }
+  } catch {
+    return undefined
+  }
+}
+
+export type Parsed = { isOk: boolean; text: string; usage?: Usage; error?: string; /** OpenCode's session id, to read the cost it recorded */ sessionId?: string }
 
 /** Reads a CLI's JSON output into the answer, the usage it reported and any error. */
 export function parse(kind: Kind, stdout: string, stderr: string, exitCode: number): Parsed {
@@ -121,6 +158,7 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
   let text = ''
   let usage: Usage | undefined
   let error: string | undefined
+  let sessionId: string | undefined
 
   if (kind === 'codex') {
     for (const l of lines) {
@@ -165,6 +203,7 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
       const d = json(l)
       if (!d) continue
       const part = d.part as Record<string, unknown> | undefined
+      if (!sessionId && typeof d.sessionID === 'string') sessionId = d.sessionID
       if (d.type === 'text' && typeof part?.text === 'string') parts.push(part.text)
       if (d.type === 'error') {
         const err = (d.error as Record<string, unknown> | undefined)?.data ?? d.error ?? d.message
@@ -177,5 +216,5 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
   if (!text && !error && lines.length && !lines.some(l => json(l))) text = lines.join('\n')
   if (exitCode !== 0 && !error) error = `exit ${exitCode}: ${clean(stderr).split('\n').slice(-6).join(' ')}`
   if (!text && !error) error = 'the CLI returned no answer'
-  return { isOk: !error && text.length > 0, text, usage, error }
+  return { isOk: !error && text.length > 0, text, usage, error, sessionId }
 }

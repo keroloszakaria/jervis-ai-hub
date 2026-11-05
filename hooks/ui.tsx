@@ -2,6 +2,7 @@
 // a page per provider, and the Add Provider view. Every control here does what
 // it says.
 import { LOGOS } from './logos'
+import { hasArabic, tr } from './i18n'
 import { atom, read } from 'claude-code'
 import type { EngineInterface, Elements } from 'claude-code'
 
@@ -14,7 +15,7 @@ import type { Status } from './health'
 import { CAPABILITIES, EFFORT_LABEL, capabilityList, favKey, hasCapability, refreshModels, resolveModel } from './models'
 import { AUTH_LABEL, PROVIDERS, TASKS, provider } from './registry'
 import type { ProviderEntry } from './registry'
-import { usageLine } from './requests'
+import { usageLine, usd } from './requests'
 import { activeRoutes } from './routing'
 import { smartPick } from './smart'
 import type { SmartPick } from './smart'
@@ -217,16 +218,38 @@ const decodeRoute = (v: string): Route | undefined => {
 }
 
 export async function renderPane($: EngineInterface, els: Els, cols: number) {
-  const { Box, Text: BaseText, Button, Link } = els
+  const { Box, Text: BaseText, Button: BaseButton, Link } = els
+  const isAr = (await read($, settings)).language === 'ar'
+  /** a label in the pane's language, keeping the spaces around it */
+  const T = (s: string): string => {
+    if (!isAr || !s.trim()) return s
+    const core = s.trim()
+    const out = tr(core)
+    return out === core ? s : `${s.slice(0, s.indexOf(core))}${out}${s.slice(s.indexOf(core) + core.length)}`
+  }
+  // Arabic has no capitals; uppercasing would only shout the Latin words inside it
+  const UP = (t: string): string => (isAr ? t : t.toUpperCase())
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const Text = ((props: any) => {
     const { children, color, dimColor, ...rest } = props ?? {}
-    const kids = children === undefined ? [] : Array.isArray(children) ? children : [children]
+    const raw = children === undefined ? [] : Array.isArray(children) ? children : [children]
+    const kids = raw.map((c: unknown) => (typeof c === 'string' ? T(c) : c))
+    const rtl = isAr && kids.some((c: unknown) => typeof c === 'string' && hasArabic(c))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return h(BaseText as any, { ...rest, color: tone(color, dimColor) }, ...kids)
+    return h(BaseText as any, { ...rest, ...(rtl ? { dir: 'rtl' } : {}), color: tone(color, dimColor) }, ...kids)
   }) as typeof BaseText
-  const Select = 'Select' in els ? els.Select : undefined
-  const Input = 'Input' in els ? els.Input : undefined
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const Button = ((props: any) => h(BaseButton as any, { ...props, label: typeof props?.label === 'string' ? T(props.label) : props?.label })) as typeof BaseButton
+  const BaseSelect = 'Select' in els ? els.Select : undefined
+  const Select = BaseSelect
+    ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (((props: any) => h(BaseSelect as any, { ...props, options: (props.options ?? []).map((o: { value: string; label: string }) => ({ ...o, label: T(o.label) })) })) as typeof BaseSelect)
+    : undefined
+  const BaseInput = 'Input' in els ? els.Input : undefined
+  const Input = BaseInput
+    ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (((props: any) => h(BaseInput as any, { ...props, label: props.label ? T(props.label) : props.label, placeholder: props.placeholder ? T(props.placeholder) : props.placeholder, submitLabel: props.submitLabel ? T(props.submitLabel) : props.submitLabel })) as typeof BaseInput)
+    : undefined
   const Svg = 'Svg' in els ? els.Svg : undefined
 
   const u: PaneUi = await read($, ui)
@@ -258,7 +281,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
   const Heading = ({ title, meta, right }: { title: string; meta?: string; right?: ReturnType<typeof Button> }) => (
     <Box marginTop="md" paddingX="xs" flexDirection="row" justifyContent="space-between" alignItems="center">
       <Text size="caption" weight="bold" mono color={NEON}>
-        {title.toUpperCase()}
+        {UP(T(title))}
       </Text>
       {right ?? (meta ? (
         <Text size="caption" mono dimColor>
@@ -311,7 +334,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
     >
       <Box flexDirection="row" justifyContent="space-between" gap={1}>
         <Text size="caption" weight="semibold" mono color={color} dimColor={!color}>
-          {label.toUpperCase()}
+          {UP(T(label))}
         </Text>
         {icon ? (
           <Text size="caption" color={color} dimColor={!color}>
@@ -611,7 +634,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           </Box>
         )}
         <Box marginTop={1}>
-          <Hint text="🔒 Keys are typed into a masked Windows dialog and stored encrypted for your account (DPAPI), never shown here." />
+          <Hint text="🔒 Keys are typed into a masked system dialog and kept in your system’s secure storage (Windows DPAPI, macOS Keychain or the Linux keyring), never shown here." />
         </Box>
       </Box>
     )
@@ -661,7 +684,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
 
         <Heading
           title="Limits"
-          right={<Button key={`limits-refresh-${p.id}`} plain dimColor label={lims[p.id]?.state === 'checking' ? 'Checking…' : 'Refresh'} onPress={() => void refreshLimits($, p.id)} />}
+          right={<Button key={`limits-refresh-${p.id}`} plain dimColor label={lims[p.id]?.state === 'checking' ? 'Checking…' : 'Refresh'} onPress={() => void refreshLimits($, p.id, { force: true })} />}
         />
         <Box key="limits-card" {...CARD}>
           {lims[p.id]?.plan ? <KV label="Plan" value={cap(lims[p.id]?.plan ?? '')} /> : null}
@@ -802,7 +825,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           <Box flexDirection="column">
             <Heading
               title="Limits"
-              right={<Button key="limits-refresh-all" plain dimColor label={connected.some(p => lims[p.id]?.state === 'checking') ? 'Checking…' : 'Refresh'} onPress={() => void refreshAllLimits($)} />}
+              right={<Button key="limits-refresh-all" plain dimColor label={connected.some(p => lims[p.id]?.state === 'checking') ? 'Checking…' : 'Refresh'} onPress={() => void refreshAllLimits($, { force: true })} />}
             />
             <Box key="limits-overview" {...CARD}>
               <Box key="lrow-claude" flexDirection="column" paddingX="sm" paddingY="xs" hover={{ backgroundColor: ROW_HOVER }}>
@@ -1020,6 +1043,9 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
       </Box>
     )
     const chartRows = log.filter(a => a.ms !== undefined).slice(-30)
+    // only what OpenCode recorded per request; subscription requests carry no cost
+    const costed = log.filter(a => a.usage?.costUsd !== undefined)
+    const costTotal = costed.length ? costed.reduce((t, a) => t + (a.usage?.costUsd ?? 0), 0) : undefined
     return (
       <Box flexDirection="column">
         {head}
@@ -1028,6 +1054,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           <Tile value={String(log.length)} label="Requests" icon="↗" />
           <Tile value={String(failed)} label="Failed" icon="!" color={failed ? 'error' : undefined} />
           <Tile value={avg !== undefined ? ms(avg) : '–'} label="Avg latency" icon="◷" />
+          {costTotal !== undefined ? <Tile value={usd(costTotal)} label="API cost" icon="$" sub="as OpenCode recorded it" /> : null}
         </Box>
 
         {Svg && chartRows.length > 1 && (
@@ -1083,7 +1110,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
                     <Text weight="semibold">{snip(p?.label ?? id, IN - 6)}</Text>
                   </Box>
                   <Hint
-                    text={`${s.requests} req · ${s.failures} failed${s.avgMs ? ` · avg ${ms(s.avgMs)}` : ''} · ${s.hasTokens ? `${k(s.inputTokens)} in / ${k(s.outputTokens)} out` : 'tokens not reported'}`}
+                    text={`${s.requests} req · ${s.failures} failed${s.avgMs ? ` · avg ${ms(s.avgMs)}` : ''} · ${s.hasTokens ? `${k(s.inputTokens)} in / ${k(s.outputTokens)} out` : 'tokens not reported'}${s.costUsd !== undefined ? ` · ${usd(s.costUsd)}` : ''}`}
                   />
                 </Box>
               )
@@ -1191,6 +1218,20 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
     <Box flexDirection="column">
       {head}
 
+      <Heading title="Language" />
+      <Box key="lang-card" {...CARD}>
+        <Pick
+          id="language"
+          label="Language"
+          value={st.language ?? 'en'}
+          options={[
+            { value: 'en', label: 'English' },
+            { value: 'ar', label: 'العربية' },
+          ]}
+          onSelect={v => void saveSettings($, s => ({ ...s, language: v === 'ar' ? 'ar' : 'en' }))}
+        />
+      </Box>
+
       <Heading title="Model for each task" />
       <Box key="smart-card" {...CARD}>
         <Toggle
@@ -1283,6 +1324,13 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           on={st.verifyOnConnect}
           label="Test right after connecting"
           onPress={() => void saveSettings($, s => ({ ...s, verifyOnConnect: !s.verifyOnConnect }))}
+        />
+        <Toggle
+          id="limit-alerts"
+          on={st.limitAlerts !== false}
+          label="Alert me near a provider’s limit"
+          hint="A toast at 80% and 95% of a window the provider reports, and when it reports a block."
+          onPress={() => void saveSettings($, s => ({ ...s, limitAlerts: s.limitAlerts === false }))}
         />
         <Box marginTop="sm">
           <Hint text="🔒 Changing files always asks first. Read-only requests run in an empty folder." />

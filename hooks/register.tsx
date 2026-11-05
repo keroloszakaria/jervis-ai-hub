@@ -101,12 +101,13 @@ async function registerTools($: EngineInterface): Promise<void> {
     isDeferred: false,
     description:
       'Send the same read-only prompt to several connected providers at once and get their answers side by side, for comparing models. ' +
-      'Runs in an empty folder: only the prompt is sent. Defaults to up to four ready providers.',
+      'Runs in an empty folder: only the prompt is sent. Defaults to up to four ready providers, skipping any at its limit; each uses its best model for the task.',
     inputSchema: {
       type: 'object',
       properties: {
         prompt: { type: 'string', description: 'The full, self-contained prompt' },
         providers: { type: 'array', items: providerProp, description: 'Which providers (2 to 5); default: the ready ones' },
+        task: { type: 'string', enum: tasks, description: 'Optional: each provider then answers with its best model and effort for this task' },
       },
       required: ['prompt'],
     },
@@ -130,6 +131,28 @@ async function registerTools($: EngineInterface): Promise<void> {
   })
 }
 
+/** `/ask-ai` arguments: an optional provider (id or name), an optional task, then the question. */
+export async function parseAskArgs(
+  $: EngineInterface,
+  args: string,
+): Promise<{ provider?: string; task?: Task; prompt: string; connected: string[] }> {
+  const cfg = await read($, config)
+  const live = PROVIDERS.filter(p => cfg[p.id]?.isConnected && cfg[p.id]?.isEnabled)
+  const words = args.trim().split(/\s+/).filter(Boolean)
+  let providerId: string | undefined
+  let task: Task | undefined
+  for (let i = 0; i < 2 && words.length; i++) {
+    const w = words[0]!.toLowerCase()
+    const p = !providerId ? live.find(x => x.id === w || x.label.toLowerCase().split(/\s+/)[0] === w) : undefined
+    const t = !task ? TASKS.find(x => x.id === w) : undefined
+    if (p) providerId = p.id
+    else if (t) task = t.id
+    else break
+    words.shift()
+  }
+  return { provider: providerId, task, prompt: words.join(' '), connected: live.map(p => p.id) }
+}
+
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : undefined)
 
 export const register: Register = on => {
@@ -141,6 +164,10 @@ export const register: Register = on => {
     await $.command.register({
       name: 'ai-providers',
       description: 'Open Jervis AI Hub: connect AI providers, pick models, route, compare and review activity',
+    })
+    await $.command.register({
+      name: 'ask-ai',
+      description: 'Ask a connected AI directly: /ask-ai [provider] [task] your question (read-only, only the question is sent)',
     })
     await registerTools($)
     void $.ui.open({ id: PANE, title: TITLE, backgroundColor: BG })
@@ -172,6 +199,21 @@ export const register: Register = on => {
     return { text: 'Jervis AI Hub opened.' }
   })
 
+  // /ask-ai [provider] [task] question: the person's own words, read-only, in the empty folder
+  on('command.run', { command: 'ask-ai' }, async ($, e) => {
+    const parsed = await parseAskArgs($, e.args)
+    if (!parsed.prompt) {
+      return {
+        text:
+          'Usage: /ask-ai [provider] [task] your question\n' +
+          `Providers: ${parsed.connected.join(', ') || 'none connected yet (open /ai-providers)'}\n` +
+          `Tasks: ${TASKS.map(t => t.id).join(', ')}. With neither, the hub picks the best connected model.`,
+      }
+    }
+    const r = await askTool($, { provider: parsed.provider, task: parsed.task, prompt: parsed.prompt, mode: 'read' })
+    return { text: r.text, context: [`The person asked another AI through /ask-ai. Its answer:\n${r.text}`] }
+  })
+
   on('tool.call', { tool: 'mcp__ai-subscriptions__ask_ai' }, async ($, e) => {
     const a = e as unknown as Record<string, unknown>
     const prompt = str(a.prompt)
@@ -195,7 +237,8 @@ export const register: Register = on => {
     const prompt = str(a.prompt)
     if (!prompt) return { deny: 'compare_ai needs a prompt.' }
     const ids = Array.isArray(a.providers) ? a.providers.filter((x): x is string => typeof x === 'string') : undefined
-    const r = await compareTool($, prompt, ids)
+    const task = TASKS.some(t => t.id === a.task) ? (a.task as Task) : undefined
+    const r = await compareTool($, prompt, ids, task)
     return r.isOk ? { result: r.text } : { deny: r.text }
   })
 

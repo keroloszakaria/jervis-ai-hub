@@ -30,6 +30,10 @@ type World = {
   asked: string[]
   leakKeyInStderr: boolean
   balanceAuth?: string
+  toasts: string[]
+  /** OpenCode prints a session id and records a cost on it */
+  withSession?: boolean
+  os?: 'mac'
 }
 
 /** reads a PowerShell -EncodedCommand back into its script (UTF-16LE, base64) */
@@ -65,7 +69,10 @@ function engine(on: any, w: World) {
   on('command.register', () => ({ value: { command: 'ai-providers' } }))
   on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__ai-subscriptions__${e.name}` } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_: unknown, e: { text?: string; message?: string }) => {
+    w.toasts.push(String(e.text ?? e.message ?? JSON.stringify(e)))
+    return { value: undefined }
+  })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('store.get', (_: unknown, e: { key: string }) => ({ value: w.store[e.key] }))
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
@@ -76,7 +83,11 @@ function engine(on: any, w: World) {
     delete w.store[e.key]
     return { value: undefined }
   })
-  on('env.get', (_: unknown, e: { name: string }) => ({ value: e.name === 'TEMP' ? 'C:\\Temp' : 'C:\\Local' }))
+  on('env.get', (_: unknown, e: { name: string }) =>
+    w.os === 'mac'
+      ? { value: e.name === 'HOME' ? '/Users/me' : e.name === 'TMPDIR' ? '/tmp/' : e.name === 'PATH' ? '/usr/bin' : undefined }
+      : { value: e.name === 'TEMP' ? 'C:\\Temp' : 'C:\\Local' },
+  )
   on('fs.list', () => ({ value: [{ name: 'abc', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }))
   on('fs.exists', () => ({ value: true }))
   on('fs.write', () => ({ value: undefined }))
@@ -104,6 +115,13 @@ function engine(on: any, w: World) {
     w.ran.push(run)
     const a = e.argv.join(' ')
     if (e.argv[0] === 'where' || e.argv[0] === 'which') return ok('', 'not found', 1)
+    if (e.argv[0] === 'uname') return ok('Darwin\n')
+    if (e.argv[0] === 'osascript') return ok(`${SECRET}\n`)
+    if (e.argv[0] === 'security') return e.argv[1] === 'find-generic-password' ? ok(`${SECRET}\n`) : ok('')
+    if (e.argv[0] === 'sh') return ok(`${RATE}\n`)
+    if (e.argv[1] === 'session' && e.argv[2] === 'export') {
+      return ok(JSON.stringify({ info: { id: e.argv[3], cost: 0.5, tokens: { input: 120, output: 30, reasoning: 0, cache: { read: 64, write: 0 } } } }))
+    }
     if (e.argv[0] === 'powershell.exe') {
       // protect (stdin = plaintext), reveal (stdin = cipher), prompt (no stdin)
       if (run.stdin === CIPHER) return ok(SECRET)
@@ -123,7 +141,7 @@ function engine(on: any, w: World) {
     }
     if (e.argv[1] === 'run') {
       if (w.leakKeyInStderr) return ok('', `401 invalid key ${run.env?.DEEPSEEK_API_KEY ?? ''}`, 1)
-      return ok('{"type":"text","part":{"text":"answer from opencode"}}')
+      return ok(`{"type":"text",${w.withSession ? '"sessionID":"ses_1",' : ''}"part":{"text":"answer from opencode"}}`)
     }
     if (e.argv.includes('/usage')) {
       return ok(JSON.stringify({ status: 'SUCCESS', response: '', command: { name: 'usage', data: { groups: [{ name: 'Gemini Models', buckets: [{ window: 'weekly', remaining_fraction: 0.85, reset_time: '1970-01-01T00:30:00Z' }, { window: '5h', remaining_fraction: 0.4, reset_time: '1970-01-01T00:20:00Z' }] }] } } }))
@@ -139,6 +157,7 @@ const world = (store: Record<string, unknown> = {}): World => ({
   answer: 'Deny',
   asked: [],
   leakKeyInStderr: false,
+  toasts: [],
 })
 
 const LEGACY = () => ({
@@ -378,4 +397,91 @@ test('a task with no provider goes to the best-fitting model, with the reported 
   expect(await ui.find({ key: 'pick-reasoning' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Why: reasoning/ })).toBeDefined()
   await ui.unmount()
+})
+
+
+test('a limit alert shows once per level, and a fresh reading is reused for a minute', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(80)
+  const reads = () => w.ran.filter(x => x.argv[0] === 'powershell.exe' && psScript(x.argv).includes('account/rateLimits/read')).length
+  const alerts = () => w.toasts.filter(t => /ChatGPT \(Codex\) 5-hour limit at 92% used/.test(t)).length
+  expect(reads()).toBe(1)
+  expect(alerts()).toBe(1)
+  // a request moves the plan, but the reading is under a minute old: nothing is read again
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'x' } as never)
+  await settle()
+  expect(reads()).toBe(1)
+  // Refresh reads now; the same level is not announced twice
+  const ui = await $.ui.mount({ ...PANE(), surface: 'desktop' })
+  await ui.press({ key: 'limits-refresh-all' })
+  await settle(60)
+  expect(reads()).toBe(2)
+  expect(alerts()).toBe(1)
+  await ui.unmount()
+})
+
+test('/ask-ai asks directly; compare uses each provider’s best model; OpenCode’s recorded cost is shown', async ($, on) => {
+  const w = world(LEGACY())
+  w.withSession = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(80)
+
+  const help = await $.command.run({ command: 'ask-ai', args: '' } as never)
+  expect(help.text).toContain('Usage: /ask-ai')
+  const r = await $.command.run({ command: 'ask-ai', args: 'deepseek what is 2+2' } as never)
+  const run = w.ran.filter(x => x.argv[1] === 'run').pop()
+  expect(run?.stdin).toBe('what is 2+2')
+  expect(run?.cwd).toBe('C:\\Temp\\jervis-ai-hub\\sandbox')
+  expect(r.text).toContain('answer from opencode')
+  expect(r.text).toContain('cost OpenCode recorded: $0.50')
+
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__compare_ai', prompt: 'which?', providers: ['chatgpt', 'deepseek'], task: 'reasoning' } as never)
+  expect(w.ran.filter(x => x.argv[1] === 'exec').pop()?.argv).toContain('model_reasoning_effort="high"')
+
+  const ui = await $.ui.mount({ ...PANE(), surface: 'desktop' })
+  await ui.press({ key: 'tab-activity' })
+  expect(await ui.find({ type: 'Text', text: /API COST/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\$1\.00/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the pane reads in Arabic when the language is set', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { routes: {}, profiles: {}, language: 'ar' } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(60)
+  const ui = await $.ui.mount({ ...PANE(), surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /الـ Providers/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Providers$/i })).toBeUndefined()
+  await ui.press({ key: 'tab-settings' })
+  expect(await ui.find({ type: 'Text', text: /موديل لكل مهمة/ })).toBeDefined()
+  await ui.select({ key: 'language', value: 'en' })
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /MODEL FOR EACH TASK/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('on macOS keys live in the Keychain, passed on stdin, and the store keeps only a marker', async ($, on) => {
+  const w = world(LEGACY())
+  w.os = 'mac'
+  engine(on, w)
+  await $.session.start({ cwd: '/Users/me/proj', surface: 'desktop', isInteractive: true })
+  await settle(80)
+  const add = w.ran.find(x => x.argv[0] === 'security' && x.argv[1] === '-i')
+  expect(add?.stdin).toContain('add-generic-password -U -s jervis-ai-hub -a "deepseek"')
+  expect(add?.stdin).toContain('sk-plain-abcdef1234567890')
+  expect(w.ran.some(x => x.argv.join(' ').includes('sk-plain-abcdef1234567890'))).toBe(false)
+  expect((w.store['hub-creds-dpapi-v1'] as Record<string, string>).deepseek).toBe('keychain:v1')
+  expect(JSON.stringify(w.store)).not.toContain('sk-plain-abcdef1234567890')
+
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', prompt: 'hi' } as never)
+  const run = w.ran.filter(x => x.argv[1] === 'run').pop()
+  expect(run?.env?.DEEPSEEK_API_KEY).toBe(SECRET)
+  expect(run?.cwd).toBe('/tmp/jervis-ai-hub/sandbox')
+  // Codex limits without PowerShell
+  expect(w.ran.some(x => x.argv[0] === 'sh' && x.argv.includes('{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}'))).toBe(true)
+  expect(w.ran.some(x => x.argv[0] === 'powershell.exe')).toBe(false)
 })

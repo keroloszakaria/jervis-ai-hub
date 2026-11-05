@@ -97,6 +97,8 @@ export type ProviderStats = {
   inputTokens: number
   outputTokens: number
   hasTokens: boolean
+  /** sum of the costs the CLI recorded (OpenCode), where it recorded any */
+  costUsd?: number
 }
 
 /** Per-provider totals over what the log still holds. */
@@ -110,6 +112,9 @@ export function stats(list: readonly Activity[]): Record<string, ProviderStats> 
     if (a.ms !== undefined) {
       s.msSum += a.ms
       s.msN += 1
+    }
+    if (a.usage?.costUsd !== undefined) {
+      s.costUsd = (s.costUsd ?? 0) + a.usage.costUsd
     }
     if (a.usage?.inputTokens !== undefined || a.usage?.outputTokens !== undefined) {
       s.hasTokens = true

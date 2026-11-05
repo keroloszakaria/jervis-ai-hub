@@ -11,12 +11,26 @@ import type { EngineInterface } from 'claude-code'
 import type { LimitWindow, Limits } from '../types'
 import { powershell, revealForRequest } from './auth'
 import { errText, exe, sandboxDir } from './cli'
+import { osName } from './platform'
 import { provider } from './registry'
+import { DEFAULT_SETTINGS } from './state'
 
 const limits = atom({ plugin: 'ai-subscriptions', key: 'limits' } as const, {}, { shape: 'l-1' })
 const config = atom({ plugin: 'ai-subscriptions', key: 'config' } as const, {}, { shape: 'cfg-3' })
+const settings = atom({ plugin: 'ai-subscriptions', key: 'settings' } as const, DEFAULT_SETTINGS, { shape: 'st-1' })
+
+/** A provider's limits are read again at most this often, unless the person presses Refresh. */
+export const MIN_GAP_MS = 60_000
+/** Used shares that raise a toast, once per window and level. */
+export const ALERT_LEVELS = [80, 95] as const
 
 const UTF8_OUT = '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);'
+
+const CODEX_LINES = [
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"jervis-ai-hub","version":"0.4.0"}}}',
+  '{"jsonrpc":"2.0","method":"initialized"}',
+  '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}',
+]
 
 /** Starts `codex app-server`, asks for the rate limits once, prints that one reply, and stops it. */
 const codexScript = (path: string): string => `${UTF8_OUT}$ErrorActionPreference = 'Stop'
@@ -30,9 +44,7 @@ $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
 $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
 $p = [System.Diagnostics.Process]::Start($psi)
-$p.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"jervis-ai-hub","version":"0.3.0"}}}')
-$p.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"initialized"}')
-$p.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}')
+${CODEX_LINES.map(l => `$p.StandardInput.WriteLine('${l}')`).join('\n')}
 $p.StandardInput.Flush()
 $deadline = (Get-Date).AddSeconds(25)
 try {
@@ -68,8 +80,15 @@ function codexWindows(rl: Record<string, unknown>): LimitWindow[] {
 async function readCodex($: EngineInterface, now: number): Promise<Limits> {
   const path = await exe($, 'codex')
   if (!path) return { at: now, state: 'error', source: 'Codex CLI', error: 'the Codex CLI is not installed' }
-  const r = await powershell($, codexScript(path), undefined, 40_000)
-  const line = r.out.split(/\r?\n/).find(l => l.startsWith('{"id":2,'))
+  let out: string
+  if ((await osName($)) === 'windows') {
+    out = (await powershell($, codexScript(path), undefined, 40_000)).out
+  } else {
+    // stdin stays open a few seconds so the server answers before it sees the end
+    const r = await $.process.run(['sh', '-c', 'p="$1"; shift; { printf \'%s\\n\' "$@"; sleep 12; } | "$p" app-server', 'sh', path, ...CODEX_LINES], { timeoutMs: 40_000 })
+    out = r.stdout
+  }
+  const line = out.split(/\r?\n/).find(l => l.startsWith('{"id":2,'))
   if (!line) return { at: now, state: 'error', source: 'Codex CLI', error: 'the Codex app server did not answer with rate limits' }
   const reply = obj(JSON.parse(line))
   const res = obj(reply?.result)
@@ -211,11 +230,52 @@ export function unsupportedReason(id: string): string {
   return 'This provider has no documented endpoint for a key’s balance; see its console.'
 }
 
-/** Reads one provider's limits and keeps them in state. */
-export async function refreshLimits($: EngineInterface, id: string): Promise<void> {
+/** The level each window was last announced at, so a toast shows once per window and level. */
+const announced = new Map<string, number>()
+
+/** Toasts a window that crossed 80% or 95% used, or a reported block, once each. */
+export async function alertLimits($: EngineInterface, id: string, l: Limits): Promise<void> {
+  if (l.state !== 'ok' || (await read($, settings)).limitAlerts === false) return
+  const name = provider(id)?.label ?? id
+  if (l.isBlocked) {
+    const key = `${id}|blocked`
+    if (!announced.has(key)) {
+      announced.set(key, 100)
+      $.ui.toast(`Jervis AI Hub: ${name} reports its limit reached.`)
+    }
+    return
+  }
+  announced.delete(`${id}|blocked`)
+  for (const w of l.windows ?? []) {
+    const level = [...ALERT_LEVELS].reverse().find(v => w.usedPercent >= v) ?? 0
+    // a new window (another reset time) starts over
+    const key = `${id}|${w.group ?? ''}|${w.label}|${w.resetsAt ?? ''}`
+    if (level <= (announced.get(key) ?? 0)) continue
+    announced.set(key, level)
+    $.ui.toast(`Jervis AI Hub: ${name}${w.group ? ` ${w.group}` : ''} ${w.label.toLowerCase()} limit at ${Math.round(w.usedPercent)}% used.`)
+  }
+}
+
+const reading = new Map<string, Promise<void>>()
+
+/**
+ * Reads one provider's limits and keeps them in state. A reading newer than
+ * MIN_GAP_MS is kept unless `force` (the Refresh button); one in progress is shared.
+ */
+export function refreshLimits($: EngineInterface, id: string, opts: { force?: boolean } = {}): Promise<void> {
+  const running = reading.get(id)
+  if (running) return running
+  const job = readLimits($, id, opts.force === true).finally(() => reading.delete(id))
+  reading.set(id, job)
+  return job
+}
+
+async function readLimits($: EngineInterface, id: string, force: boolean): Promise<void> {
   const p = provider(id)
   if (!p) return
   const now = await $.clock.now()
+  const last = (await read($, limits))[id]
+  if (!force && last && last.state === 'ok' && now - last.at < MIN_GAP_MS) return
   const reader = KEY_READERS[id]
   if (p.kind !== 'codex' && p.kind !== 'agy' && !reader) {
     await update($, limits, l => ({ ...l, [id]: { at: now, state: 'unsupported' as const, source: unsupportedReason(id) } }))
@@ -229,11 +289,12 @@ export async function refreshLimits($: EngineInterface, id: string): Promise<voi
     out = { at: now, state: 'error', source: p.kind === 'codex' ? 'Codex CLI' : p.kind === 'agy' ? 'agy /usage' : reader!.source, error: errText(error).slice(0, 200) }
   }
   await update($, limits, l => ({ ...l, [id]: out }))
+  await alertLimits($, id, out)
 }
 
 /** Reads every connected provider's limits, one after another. */
-export async function refreshAllLimits($: EngineInterface): Promise<void> {
+export async function refreshAllLimits($: EngineInterface, opts: { force?: boolean } = {}): Promise<void> {
   await refreshClaudeLimits($).catch(() => undefined)
   const cfg = await read($, config)
-  for (const id of Object.keys(cfg)) if (cfg[id]?.isConnected) await refreshLimits($, id)
+  for (const id of Object.keys(cfg)) if (cfg[id]?.isConnected) await refreshLimits($, id, opts)
 }

@@ -3,12 +3,14 @@
 A Claude Code mod that connects your other AI subscriptions and API keys (ChatGPT through Codex, Antigravity, OpenCode, DeepSeek, OpenRouter, MiniMax and more) and lets Claude ask, compare or delegate to them.
 
 - **Pane:** providers, models with effort, each provider's limits, activity and settings, in a black, white and neon orange design.
-- **Tools for Claude:** `ask_ai`, `compare_ai` and `delegate_ai`.
-- **Smart pick:** with a task and no provider, the hub picks the best connected model and effort, using only what each source reports and each provider's remaining limits.
-- **Limits:** Codex plan windows, Antigravity `/usage`, your Claude session's windows, and the balance endpoints of DeepSeek, OpenRouter, Moonshot and SiliconFlow. Nothing is estimated.
-- **Security:** API keys are typed into a masked Windows dialog and stored encrypted with Windows DPAPI; they are never shown, logged or stored in plain text.
+- **Tools for Claude:** `ask_ai`, `compare_ai` and `delegate_ai`. You can also ask directly with `/ask-ai [provider] [task] your question`.
+- **Smart pick:** with a task and no provider, the hub picks the best connected model and effort, using only what each source reports and each provider's remaining limits. A fallback or a comparison uses each provider's best model too.
+- **Limits:** Codex plan windows, Antigravity `/usage`, your Claude session's windows, and the balance endpoints of DeepSeek, OpenRouter, Moonshot and SiliconFlow. Nothing is estimated. A toast warns at 80% and 95% of a window.
+- **Cost:** for API-key providers, the cost OpenCode recorded for each request, per provider and in total.
+- **Languages:** English or Arabic (Settings → Language).
+- **Security:** API keys are typed into a masked system dialog and kept in the system's secure storage: Windows DPAPI, the macOS Keychain, or the Linux Secret Service. They are never shown, logged, put on a command line or stored in plain text.
 
-Windows only (DPAPI and the key dialog). The providers' own CLIs (`codex`, `agy`, `opencode`) must be installed and signed in for the subscriptions you connect.
+Windows, macOS and Linux. Linux needs `secret-tool` (libsecret) and `zenity` or `kdialog`. The providers' own CLIs (`codex`, `agy`, `opencode`) must be installed and signed in for the subscriptions you connect.
 
 ## Install
 
@@ -35,6 +37,8 @@ Open the pane with `/ai-providers`.
 - Type checking extends `.claude-plugin/types/tsconfig.json`, which Claude Code writes the first time it loads the mod (the folder is gitignored). Load the mod once, for example with `claude --plugin-dir <this folder>`, then run `npx -p typescript tsc -p .`.
 - Tests: `claude plugin test .` and `claude plugin validate .`.
 - Don't load a development copy and the installed plugin in the same session: both register the same tools and pane.
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
 ## Licenses
 

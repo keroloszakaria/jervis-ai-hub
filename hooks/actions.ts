@@ -101,10 +101,24 @@ export async function askTool(
   }
 }
 
-export async function compareTool($: EngineInterface, prompt: string, providers?: string[]): Promise<ToolAnswer> {
-  const ids = providers?.length ? providers : (await candidates($)).slice(0, 4)
-  if (ids.length < 2) return { isOk: false, text: 'Comparing needs at least two ready providers.' }
-  const results = await compare($, ids, prompt)
+export async function compareTool($: EngineInterface, prompt: string, providers?: string[], task?: Task): Promise<ToolAnswer> {
+  const named = Boolean(providers?.length)
+  const ids = named ? [...new Set(providers)] : await candidates($)
+  const isSmart = (await read($, settings)).smartRouting !== false
+  const targets: { providerId: string; model?: string; effort?: string }[] = []
+  for (const id of ids) {
+    if (targets.length >= (named ? 5 : 4)) break
+    if (!isSmart) {
+      targets.push({ providerId: id })
+      continue
+    }
+    // each provider answers with its best model for the task
+    const pick = await smartPick($, task ?? 'general', { only: id })
+    if ('route' in pick) targets.push({ providerId: id, model: pick.route.model, effort: pick.route.effort })
+    else if (named) targets.push({ providerId: id })
+  }
+  if (targets.length < 2) return { isOk: false, text: 'Comparing needs at least two ready providers.' }
+  const results = await compare($, targets, prompt, task)
   const text = results
     .map(r => `## ${header(r)}${r.isOk ? '' : ' (failed)'}\n${r.text}${usageLine(r.usage) ? `\n_${usageLine(r.usage)}_` : ''}`)
     .join('\n\n')

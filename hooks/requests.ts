@@ -7,7 +7,7 @@ import type { EngineInterface } from 'claude-code'
 import type { ActivityType, Mode, Task, Usage } from '../types'
 import { begin, finish, redact } from './activity'
 import { revealForRequest } from './auth'
-import { MAX_ARG_PROMPT, TIMEOUT, errText, exe, invocation, parse, sandboxDir } from './cli'
+import { MAX_ARG_PROMPT, TIMEOUT, errText, exe, invocation, parse, parseOpencodeExport, sandboxDir } from './cli'
 import { resolveModel } from './models'
 import { provider } from './registry'
 import { setHealth } from './state'
@@ -84,7 +84,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
   const blocked = await readiness($, a.providerId)
   if (blocked) return fail(blocked)
   if (p.kind === 'agy' && a.prompt.length > MAX_ARG_PROMPT) {
-    return fail(`Antigravity takes the prompt on its command line, which Windows caps; this prompt is ${a.prompt.length} characters (limit ${MAX_ARG_PROMPT}).`)
+    return fail(`Antigravity takes the prompt on its command line, which the system caps; this prompt is ${a.prompt.length} characters (limit ${MAX_ARG_PROMPT}).`)
   }
   const path = await exe($, p.kind)
   if (!path) return fail(`${p.label}: its CLI was not found.`)
@@ -105,18 +105,28 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     let env: Record<string, string> | undefined
     if (p.kind === 'opencode-key' && p.envVar) {
       secret = await revealForRequest($, p.id)
-      if (!secret) throw new Error('the saved API key could not be decrypted for this Windows account; connect it again')
+      if (!secret) throw new Error('the saved API key could not be read from this account’s secure storage; connect it again')
       env = { [p.envVar]: secret }
     }
     const { argv, stdin } = invocation(p.kind, path, a.prompt, a.mode, pick.cliModel, pick.effortArg)
+    const runDir = a.cwd ?? (await sandboxDir($))
     const r = await $.process.run(argv, {
       stdin,
       env,
-      cwd: a.cwd ?? (await sandboxDir($)),
+      cwd: runDir,
       timeoutMs: TIMEOUT,
     })
     env = undefined
     const parsed = parse(p.kind, r.stdout, r.stderr, r.exitCode)
+    // OpenCode prints no usage in its run output; it records tokens and cost on the session
+    if (parsed.isOk && parsed.sessionId && (p.kind === 'opencode-key' || p.kind === 'opencode-free')) {
+      try {
+        const x = await $.process.run([path, 'session', 'export', parsed.sessionId], { cwd: runDir, timeoutMs: 30_000 })
+        if (x.exitCode === 0) parsed.usage = parseOpencodeExport(x.stdout) ?? parsed.usage
+      } catch {
+        // the answer stands without usage
+      }
+    }
     const ms = (await $.clock.now()) - started
     const secrets = secret ? [secret] : []
     const text = parsed.isOk ? parsed.text : redact(`${p.label} failed: ${parsed.error ?? 'unknown error'}`, secrets)
@@ -152,13 +162,17 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
 /** Runs one read-only prompt through several providers at once. */
 export async function compare(
   $: EngineInterface,
-  providerIds: string[],
+  targets: { providerId: string; model?: string; effort?: string }[],
   prompt: string,
+  task?: Task,
   cwd?: string,
 ): Promise<RequestResult[]> {
-  const unique = [...new Set(providerIds)].slice(0, 5)
-  return Promise.all(unique.map(id => runRequest($, { providerId: id, prompt, mode: 'read', cwd, type: 'compare' })))
+  const seen = new Set<string>()
+  const unique = targets.filter(t => !seen.has(t.providerId) && seen.add(t.providerId)).slice(0, 5)
+  return Promise.all(unique.map(t => runRequest($, { ...t, prompt, mode: 'read', cwd, type: 'compare', task })))
 }
+
+export const usd = (v: number): string => (v === 0 ? '$0' : v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`)
 
 export const usageLine = (u: Usage | undefined): string => {
   if (!u || (u.inputTokens === undefined && u.outputTokens === undefined)) return ''
@@ -167,5 +181,6 @@ export const usageLine = (u: Usage | undefined): string => {
     u.cachedTokens ? `${u.cachedTokens} cached` : '',
     u.outputTokens !== undefined ? `${u.outputTokens} out` : '',
   ].filter(Boolean)
-  return `tokens reported by the CLI: ${parts.join(', ')}`
+  const cost = u.costUsd !== undefined ? `; cost OpenCode recorded: ${usd(u.costUsd)}` : ''
+  return `tokens reported by the CLI: ${parts.join(', ')}${cost}`
 }
