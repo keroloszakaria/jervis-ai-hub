@@ -6,7 +6,7 @@ import { hasArabic, tr } from './i18n'
 import { atom, read } from 'claude-code'
 import type { EngineInterface, Elements } from 'claude-code'
 
-import type { Activity, Limits, ModelInfo, PaneUi, Route, Settings, Task } from '../types'
+import type { Activity, Limits, ModelInfo, PaneUi, Progress, Route, Settings, Task } from '../types'
 import { clearActivity, exportActivity, snip, stats } from './activity'
 import { runDiagnostics } from './diagnostics'
 import { refreshAllLimits, refreshLimits } from './limits'
@@ -15,7 +15,7 @@ import type { Status } from './health'
 import { CAPABILITIES, EFFORT_LABEL, capabilityList, favKey, hasCapability, isModelListStale, refreshModels, resolveModel } from './models'
 import { AUTH_LABEL, PROVIDERS, TASKS, provider } from './registry'
 import type { ProviderEntry } from './registry'
-import { runningIds, stopRequest, usageLine, usd } from './requests'
+import { duration, runningIds, size, stopRequest, usageLine, usd } from './requests'
 import { activeRoutes } from './routing'
 import { smartPick } from './smart'
 import type { SmartPick } from './smart'
@@ -30,7 +30,8 @@ const health = atom({ plugin: 'ai-subscriptions', key: 'health' } as const, {}, 
 const models = atom({ plugin: 'ai-subscriptions', key: 'models' } as const, {}, { shape: 'm-2' })
 const settings = atom({ plugin: 'ai-subscriptions', key: 'settings' } as const, DEFAULT_SETTINGS, { shape: 'st-1' })
 const limits = atom({ plugin: 'ai-subscriptions', key: 'limits' } as const, {}, { shape: 'l-1' })
-const ui = atom({ plugin: 'ai-subscriptions', key: 'ui' } as const, DEFAULT_UI, { shape: 'ui-2' })
+const progress = atom({ plugin: 'ai-subscriptions', key: 'progress' } as const, {}, { shape: 'p-1' })
+const ui =atom({ plugin: 'ai-subscriptions', key: 'ui' } as const, DEFAULT_UI, { shape: 'ui-2' })
 
 type Els = Elements[keyof Elements]
 
@@ -1035,6 +1036,8 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
     const filter = u.actFilter ?? 'all'
     const rows = log.filter(a => filter === 'all' || a.type === filter).slice(-40).reverse()
     const live = new Set(runningIds())
+    // read here only, so the once-a-second progress redraws this tab and no other
+    const prog: Record<string, Progress> = await read($, progress)
     const isWide = W >= 50
     const failed = log.filter(a => a.state === 'error').length
     const done = log.filter(a => a.ms !== undefined && a.state === 'ok')
@@ -1162,7 +1165,10 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
         <Box flexDirection="column" marginTop="sm">
           {rows.map(a => {
             const isOpen = u.activityOpen === a.id
-            const time = `${a.ms !== undefined ? ms(a.ms) : '…'} · ${ago(now, a.at)}`
+            const pr = a.state === 'running' ? prog[a.id] : undefined
+            const time = pr
+              ? `Running ${duration(pr.at - pr.startedAt)} · ${size(pr.bytes)}`
+              : `${a.ms !== undefined ? ms(a.ms) : '…'} · ${ago(now, a.at)}`
             const what = `· ${provider(a.provider)?.label ?? a.provider}${a.model ? ` · ${shortModel(a.model)}` : ''}${a.effort ? ` · ${a.effort}` : ''}`
             return (
               <Box flexDirection="column">
@@ -1190,6 +1196,12 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
                     <KV label="Mode" value={`${a.mode === 'write' ? 'Write' : 'Read-only'}${a.task ? ` · task ${a.task}` : ''}`} />
                     <KV label="Model" value={`${a.model ?? 'default'}${a.effort ? ` · effort ${a.effort}` : ''}`} />
                     <KV label="Prompt" value={`${a.promptChars} chars`} />
+                    {pr ? (
+                      <KV
+                        label="Progress"
+                        value={`${size(pr.bytes)} received · ${pr.lastOutputAt !== undefined ? `last output ${ago(pr.at, pr.lastOutputAt)}` : 'no output yet'}`}
+                      />
+                    ) : null}
                     {a.fallbackFrom ? <KV label="Fallback after" value={a.fallbackFrom} /> : null}
                     {usageLine(a.usage) ? <KV label="Usage" value={usageLine(a.usage).replace('tokens reported by the CLI: ', '')} /> : null}
                     {a.touchedFiles?.length ? <KV label="Files changed" value={snip(a.touchedFiles.join(', '), (IN - LABEL_W) * 3)} /> : null}
@@ -1356,6 +1368,13 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           label="Alert me near a provider’s limit"
           hint="A toast at 80% and 95% of a window the provider reports, and when it reports a block."
           onPress={() => void saveSettings($, s => ({ ...s, limitAlerts: s.limitAlerts === false }))}
+        />
+        <Toggle
+          id="done-alerts"
+          on={st.doneAlerts !== false}
+          label="Tell me when a long request ends"
+          hint="A toast when a request that ran 30 seconds or more answers, fails or times out. Not when you stop it."
+          onPress={() => void saveSettings($, s => ({ ...s, doneAlerts: s.doneAlerts === false }))}
         />
         <Box marginTop="sm">
           <Hint text="🔒 Changing files always asks first. Read-only requests run in an empty folder." />

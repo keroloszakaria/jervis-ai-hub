@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0
+
+- **Live progress:** a running request on the Activity tab shows how long it has run and how much output its CLI has written so far. Open the row to see when the CLI last wrote anything, so a request that has gone quiet is easy to spot. Only sizes and times are shown, never what the CLI wrote. Progress is kept for the session only and updates once a second.
+- **Toast when a long request ends:** a request that ran 30 seconds or more raises a toast when it answers, fails or times out. A request you stop yourself raises none. Turn it off in Settings → Privacy ("Tell me when a long request ends").
+
 ## 0.5.0
 
 - **Stop a request:** a running request shows a Stop button on the Activity tab. Stopping ends its CLI, and the request reads as stopped. A stopped request is never retried or passed to another provider.

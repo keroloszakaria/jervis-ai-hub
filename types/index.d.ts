@@ -115,6 +115,8 @@ export type Settings = {
   smartRouting?: boolean
   /** toasts when a provider's reported window passes 80% or 95% used */
   limitAlerts?: boolean
+  /** a toast when a request that ran 30 seconds or more ends; on when absent */
+  doneAlerts?: boolean
   /** the pane's language; English when absent */
   language?: 'en' | 'ar'
   fallback: boolean
@@ -126,6 +128,17 @@ export type Settings = {
   retentionDays: number
   useProjectProfile: boolean
   profiles: Record<string, Routes>
+}
+
+/** How far a running request has got, as its CLI's output shows; kept for this session only. */
+export type Progress = {
+  startedAt: number
+  /** the last time the hub looked, ms */
+  at: number
+  /** bytes of output the CLI has written so far */
+  bytes: number
+  /** when the CLI last wrote anything; absent before its first output */
+  lastOutputAt?: number
 }
 
 export type Note = { text: string; isError?: boolean; href?: string }
@@ -186,6 +199,7 @@ export type HubSettings = Settings
 export type HubActivity = Activity
 export type HubPaneUi = PaneUi
 export type HubLimits = Limits
+export type HubProgress = Progress
 
 declare module 'claude-code' {
   interface PluginState {
@@ -199,6 +213,7 @@ declare module 'claude-code' {
       ui: Shaped<HubPaneUi>
       cwd: Shaped<string>
       limits: Shaped<Record<string, HubLimits>>
+      progress: Shaped<Record<string, HubProgress>>
     }
   }
 }

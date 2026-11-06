@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { classifyError, mayFallBack, timeoutFor } from '../hooks/cli'
 import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
+import { duration, size } from '../hooks/requests'
 import { DEFAULT_SETTINGS } from '../hooks/state'
 
 declare function setTimeout(fn: () => void, ms: number): unknown
@@ -46,6 +47,14 @@ type World = {
   /** the provider CLI never answers (until stopped) */
   hang?: boolean
   instantTimeout?: boolean
+  /** the clock; 1_000_000 when absent */
+  now?: number
+  /** how far the clock moves on each reading */
+  step?: number
+  /** progress ticks waiting to fire; each resolves one once-a-second wait */
+  ticks?: (() => void)[]
+  /** what the CLI writes before it hangs */
+  partial?: string
   exists?: (path: string) => boolean
   written?: Record<string, string>
   /** npm shims on PATH instead of the installed CLIs */
@@ -112,7 +121,7 @@ function engine(on: any, w: World) {
     ;(w.written ??= {})[e.path] = String(e.content ?? e.text ?? e.data ?? '')
     return { value: undefined }
   })
-  on('clock.now', () => ({ value: 1_000_000 }))
+  on('clock.now', () => ({ value: (w.now = (w.now ?? 1_000_000) + (w.step ?? 0)) }))
   on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [] } }))
   on('http.fetch', (_: unknown, e: { url: string; init?: { headers?: Record<string, string> } }) => {
     if (e.url.includes('/user/balance')) {
@@ -136,13 +145,22 @@ function engine(on: any, w: World) {
   )
   on('process.spawn', async function* (_: unknown, e: { argv: string[]; cwd?: string; env?: Record<string, string>; input?: string }) {
     const r = respond(w, { argv: [...e.argv], cwd: e.cwd, env: e.env, stdin: e.input }).value
-    if (w.hang && (e.argv[1] === 'exec' || e.argv[1] === 'run')) await new Promise(() => undefined)
+    if (w.hang && (e.argv[1] === 'exec' || e.argv[1] === 'run')) {
+      if (w.partial) yield { stream: 'stdout' as const, text: w.partial }
+      await new Promise(() => undefined)
+    }
     if (r.stdout) yield { stream: 'stdout' as const, text: r.stdout }
     if (r.stderr) yield { stream: 'stderr' as const, text: r.stderr }
     return { value: { code: r.exitCode, signal: null } }
   })
   // the request deadline: at once when the test wants a timeout, otherwise never
-  on('clock.sleep', () => (w.instantTimeout ? { value: undefined } : new Promise(() => undefined)))
+  on('clock.sleep', (_: unknown, e: { ms: number }) =>
+    e.ms === 1000
+      ? new Promise(resolve => void (w.ticks ??= []).push(() => resolve({ value: undefined })))
+      : w.instantTimeout
+        ? { value: undefined }
+        : new Promise(() => undefined),
+  )
   on('fs.read', (_: unknown, e: { path: string }) => {
     const f = w.files?.[e.path]
     if (f === undefined) throw new Error('ENOENT')
@@ -751,4 +769,77 @@ test('export writes metadata only, never the prompt or the answer', async ($, on
   expect(all).not.toContain('OK')
   expect(w.toasts.some(t => t.includes('Activity exported'))).toBe(true)
   await ui.unmount()
+})
+
+const tick = (w: World) => {
+  const due = w.ticks ?? []
+  w.ticks = []
+  for (const f of due) f()
+}
+
+test('a running request shows how long it has run and how much its CLI wrote, never what it wrote', async ($, on) => {
+  expect(duration(42_000)).toBe('42s')
+  expect(duration(72_000)).toBe('1m 12s')
+  expect(duration(3_780_000)).toBe('1h 3m')
+  expect(size(512)).toBe('512 B')
+  expect(size(2048)).toBe('2.0 KB')
+
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, recordPreviews: false } })
+  w.hang = true
+  w.partial = 'SECRETPARTIAL'.padEnd(2048, '.')
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const call = $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'long' } as never)
+  await settle()
+  const id = (w.store['hub-activity-v1'] as { id: string }[]).at(-1)!.id
+  const ui = await $.ui.mount({ ...PANE(), surface: 'desktop' })
+  await ui.press({ key: 'tab-activity' })
+  // progress is written once a second, so the output shows at the next tick
+  expect(await ui.find({ type: 'Text', text: /^Running 0s · 0 B$/ })).toBeDefined()
+
+  w.now = 1_072_000
+  tick(w)
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /^Running 1m 12s · 2\.0 KB$/ })).toBeDefined()
+  await ui.press({ key: `act-${id}` })
+  expect(await ui.find({ type: 'Text', text: /2\.0 KB received · last output 1m ago/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SECRETPARTIAL/ })).toBeUndefined()
+
+  await ui.press({ key: `stop-${id}` })
+  await call
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /^Running / })).toBeUndefined()
+  // a stop is the person's own doing: no toast for it
+  expect(w.toasts.some(t => /answered|failed|timed out/.test(t))).toBe(false)
+  await ui.unmount()
+})
+
+test('a request that ran 30 seconds or more raises a toast when it ends', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.step = 20_000
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'hi' } as never)
+  expect(w.toasts.some(x => /^Jervis AI Hub: ChatGPT \(Codex\) answered after \d+m \d+s\.$/.test(x))).toBe(true)
+})
+
+test('the end-of-request toast can be turned off', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, doneAlerts: false } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.step = 20_000
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'hi' } as never)
+  expect(w.toasts.some(x => /answered after/.test(x))).toBe(false)
+})
+
+test('a short request raises no toast', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'hi' } as never)
+  expect(w.toasts.some(x => /answered after/.test(x))).toBe(false)
 })

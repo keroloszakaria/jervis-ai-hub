@@ -1,6 +1,6 @@
 {
   "name": "ai-subscriptions",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Jervis AI Hub: connect your ChatGPT (Codex), Antigravity, DeepSeek and other AI subscriptions and keys, pick model and effort, route, compare and review activity",
   "types": "./types/index.d.ts"
 }

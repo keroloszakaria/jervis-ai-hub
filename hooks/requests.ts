@@ -1,7 +1,7 @@
 // Running requests: one call through a provider's CLI, with activity logging,
 // redaction and de-duplication; and the comparison across several providers.
 import { refreshLimits } from './limits'
-import { atom, read } from 'claude-code'
+import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { ActivityType, Mode, Task, Usage } from '../types'
@@ -11,12 +11,14 @@ import { ERROR_LABEL, type ErrorKind, MAX_ARG_PROMPT, argvOf, classifyError, err
 import { resolveModel } from './models'
 import { sessionKey } from './permissions'
 import { provider } from './registry'
-import { setHealth } from './state'
+import { DEFAULT_SETTINGS, setHealth } from './state'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
 const config = atom({ plugin: 'ai-subscriptions', key: 'config' } as const, {}, { shape: 'cfg-3' })
 const health = atom({ plugin: 'ai-subscriptions', key: 'health' } as const, {}, { shape: 'h-1' })
 const models = atom({ plugin: 'ai-subscriptions', key: 'models' } as const, {}, { shape: 'm-2' })
+const settings = atom({ plugin: 'ai-subscriptions', key: 'settings' } as const, DEFAULT_SETTINGS, { shape: 'st-1' })
+const progress = atom({ plugin: 'ai-subscriptions', key: 'progress' } as const, {}, { shape: 'p-1' })
 
 export type RequestResult = {
   isOk: boolean
@@ -85,6 +87,25 @@ async function runStoppable(
   )
   let stdout = ''
   let stderr = ''
+  // progress is counted here and written to state once a second, never per chunk;
+  // only sizes and times are kept, never what the CLI wrote
+  const startedAt = await $.clock.now()
+  let bytes = 0
+  let lastOutputAt: number | undefined
+  let isDone = false
+  await update($, progress, p => ({ ...p, [activityId]: { startedAt, at: startedAt, bytes: 0 } }))
+  void (async () => {
+    while (!isDone) {
+      try {
+        await $.clock.sleep(TICK_MS, { signal: timer.signal })
+      } catch {
+        return
+      }
+      if (isDone) return
+      const at = await $.clock.now()
+      await update($, progress, p => (p[activityId] ? { ...p, [activityId]: { startedAt, at, bytes, lastOutputAt } } : p))
+    }
+  })()
   try {
     for (;;) {
       const step = await Promise.race([stream.next(), stopped])
@@ -93,14 +114,53 @@ async function runStoppable(
         return { exitCode: 1, stdout, stderr, ended: step }
       }
       if (step.done) return { exitCode: step.value.code ?? 1, stdout, stderr, ended: 'exit' }
+      bytes += step.value.text.length
+      lastOutputAt = await $.clock.now()
       if (step.value.stream === 'stdout') {
         if (stdout.length < CAP) stdout += step.value.text
       } else if (stderr.length < CAP) stderr += step.value.text
     }
   } finally {
+    isDone = true
     timer.abort()
     running.delete(activityId)
+    await update($, progress, p => {
+      const { [activityId]: _gone, ...rest } = p
+      return rest
+    })
   }
+}
+
+/** How often a running request's progress is written, ms. */
+const TICK_MS = 1000
+
+/** A request that ran at least this long gets a toast when it ends. */
+export const DONE_ALERT_MS = 30_000
+
+/** "42s", "1m 12s", "1h 3m". */
+export const duration = (ms: number): string => {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+}
+
+/** "512 B", "3.4 KB", "1.2 MB". */
+export const size = (n: number): string =>
+  n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`
+
+/** Tells the person a long request ended, unless they turned it off or stopped it themselves. */
+async function announce($: EngineInterface, label: string, ms: number, outcome: 'ok' | 'error' | 'timeout' | 'cancelled'): Promise<void> {
+  if (outcome === 'cancelled' || ms < DONE_ALERT_MS) return
+  if ((await read($, settings)).doneAlerts === false) return
+  const took = duration(ms)
+  $.ui.toast(
+    outcome === 'ok'
+      ? `Jervis AI Hub: ${label} answered after ${took}.`
+      : outcome === 'timeout'
+        ? `Jervis AI Hub: ${label} timed out after ${took}.`
+        : `Jervis AI Hub: ${label} failed after ${took}.`,
+  )
 }
 
 /** Whether a provider may take a request now: connected, on, installed and signed in. */
@@ -177,6 +237,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
           : `stopped after ${Math.round(timeoutMs / 60_000)} minutes without finishing`
       const left = a.mode === 'write' ? ' Changes it made so far stay in the folder for review; nothing was retried.' : ''
       await finish($, id, { state: r.ended === 'cancelled' ? 'cancelled' : 'error', ms, error: why })
+      await announce($, p.label, ms, r.ended)
       return { isOk: false, provider: a.providerId, model, effort, text: `${p.label}: ${why}.${left}`, ms, errorKind: r.ended }
     }
     const parsed = parse(p.kind, r.stdout, r.stderr, r.exitCode)
@@ -207,6 +268,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
       },
       secrets,
     )
+    await announce($, p.label, ms, parsed.isOk ? 'ok' : 'error')
     if (parsed.isOk) {
       const at = await $.clock.now()
       await setHealth($, a.providerId, h => ({ ...h, lastSuccessAt: at, lastLatencyMs: ms }))
@@ -218,6 +280,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     const ms = (await $.clock.now()) - started
     const message = redact(errText(error), secret ? [secret] : [])
     await finish($, id, { state: 'error', ms, error: message })
+    await announce($, p.label, ms, 'error')
     return { isOk: false, provider: a.providerId, model, effort, text: `${p.label} could not run: ${message}`, ms, errorKind: classifyError(message) }
   } finally {
     secret = undefined

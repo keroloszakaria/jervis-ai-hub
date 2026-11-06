@@ -195,6 +195,11 @@ const AR: Record<string, string> = {
   'keep redacted prompt previews': 'احتفظ بمعاينات للـ prompts متخبّي منها الأسرار',
   'test right after connecting (sends one real prompt)': 'اختبر على طول بعد التوصيل (بيبعت طلب حقيقي واحد)',
   'alert me near a provider’s limit': 'نبّهني لما provider يقرب من حده',
+  'tell me when a long request ends': 'نبّهني لما طلب طويل يخلص',
+  'a toast when a request that ran 30 seconds or more answers, fails or times out. not when you stop it.':
+    'تنبيه لما طلب أخد 30 ثانية أو أكتر يرد أو يفشل أو وقته يخلص. مش لما توقفه إنت.',
+  progress: 'التقدم',
+  'no output yet': 'لسه مفيش output',
   'a toast at 80% and 95% of a window the provider reports, and when it reports a block.': 'تنبيه عند 80% و95% من أي حد الـ provider بيعلنه، ولما يعلن إنه اتقفل.',
   '🔒 changing files always asks first. read-only requests run in an empty folder.': '🔒 تغيير الملفات دايماً بيسأل الأول. طلبات القراية بتشتغل في فولدر فاضي.',
   '🔒 keys are typed into a masked system dialog and kept in your system’s secure storage (windows dpapi, macos keychain or the linux keyring), never shown here.':
@@ -230,6 +235,9 @@ const PATTERNS: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^(.+) is the CLI’s default\.$/i, m => `${tr(m[1]!)} هو الافتراضي في الـ CLI.`],
   [/^(.+): open the hub on desktop or terminal to type here\.$/i, m => `${tr(m[1]!)}: افتح الهب على الديسكتوب أو التيرمينال علشان تكتب هنا.`],
   [/^(\d+) chars$/i, m => `${m[1]} حرف`],
+  [/^Running (.+) · (.+)$/, m => `شغال من ${m[1]} · ${m[2]}`],
+  [/^(.+) received · last output (.+)$/, m => `وصل ${m[1]} · آخر output ${tr(m[2]!)}`],
+  [/^(.+) received · no output yet$/, m => `وصل ${m[1]} · لسه مفيش output`],
 ]
 
 /** The Arabic for one label, or the label itself where there is none. */
