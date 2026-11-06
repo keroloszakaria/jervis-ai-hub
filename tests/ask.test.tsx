@@ -55,6 +55,8 @@ type World = {
   ticks?: (() => void)[]
   /** what the CLI writes before it hangs */
   partial?: string
+  /** the agent.spawn inputs that reached the engine */
+  spawned?: { subagentType: string; model?: string }[]
   exists?: (path: string) => boolean
   written?: Record<string, string>
   /** npm shims on PATH instead of the installed CLIs */
@@ -161,6 +163,10 @@ function engine(on: any, w: World) {
         ? { value: undefined }
         : new Promise(() => undefined),
   )
+  on('agent.spawn', (_: unknown, e: { subagentType: string; model?: string }) => {
+    ;(w.spawned ??= []).push({ subagentType: e.subagentType, model: e.model })
+    return { model: e.model === 'haiku' ? 'claude-haiku-5-5' : e.model ?? 'claude-opus-5-5', agentId: `a${w.spawned.length}` }
+  })
   on('fs.read', (_: unknown, e: { path: string }) => {
     const f = w.files?.[e.path]
     if (f === undefined) throw new Error('ENOENT')
@@ -842,4 +848,65 @@ test('a short request raises no toast', async ($, on) => {
   await settle()
   await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'hi' } as never)
   expect(w.toasts.some(x => /answered after/.test(x))).toBe(false)
+})
+
+const SPAWN = (subagentType: string, extra: Record<string, unknown> = {}) =>
+  ({ prompt: 'p', description: 'd', subagentType, fork: false, background: false, parentModel: 'claude-opus-5-5', ...extra }) as never
+
+const RULES_ON = { isOn: true, rules: { Explore: 'haiku', 'general-purpose': 'sonnet', '*': 'sonnet' } }
+
+test('with rules on, a subagent Claude names no model for runs on its type’s model', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, subagentModels: RULES_ON } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = await $.agent.spawn(SPAWN('Explore'))
+  expect(w.spawned?.at(-1)).toEqual({ subagentType: 'Explore', model: 'haiku' })
+  expect(r.model).toBe('claude-haiku-5-5')
+  await $.agent.spawn(SPAWN('my-reviewer'))
+  expect(w.spawned?.at(-1)?.model).toBe('sonnet')
+
+  // the list shows what each ran on and who chose it
+  await settle()
+  const ui = await $.ui.mount({ ...PANE(80), surface: 'desktop' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await ui.find({ type: 'Text', text: /^This session · 2 subagents$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Explore → claude-haiku-5-5 · your rule/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a model Claude names, a fork, a resume and a workflow agent are left alone', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, subagentModels: RULES_ON } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.agent.spawn(SPAWN('Explore', { model: 'opus' }))
+  expect(w.spawned?.at(-1)?.model).toBe('opus')
+  await $.agent.spawn(SPAWN('fork', { fork: true }))
+  expect(w.spawned?.at(-1)?.model).toBeUndefined()
+  await $.agent.spawn(SPAWN('Explore', { resume: { agentId: 'x' } }))
+  expect(w.spawned?.at(-1)?.model).toBeUndefined()
+  await $.agent.spawn(SPAWN('Explore', { workflow: { runId: 'wf_1', agentIndex: 1 } }))
+  expect(w.spawned?.at(-1)?.model).toBeUndefined()
+})
+
+test('subagent rules are off until turned on, and the switch is saved', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.agent.spawn(SPAWN('Explore'))
+  expect(w.spawned?.at(-1)?.model).toBeUndefined()
+
+  const ui = await $.ui.mount({ ...PANE(80), surface: 'desktop' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await ui.find({ type: 'Text', text: /Explore → claude-opus-5-5 · its own or the session’s/ })).toBeDefined()
+  await ui.press({ key: 'subagent-models' })
+  await settle()
+  const saved = w.store['hub-settings-v1'] as { subagentModels?: { isOn: boolean; rules: Record<string, string> } }
+  expect(saved.subagentModels?.isOn).toBe(true)
+  expect(saved.subagentModels?.rules.Explore).toBe('haiku')
+  await $.agent.spawn(SPAWN('Explore'))
+  expect(w.spawned?.at(-1)?.model).toBe('haiku')
+  await ui.unmount()
 })

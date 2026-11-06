@@ -199,6 +199,14 @@ const AR: Record<string, string> = {
   'a toast when a request that ran 30 seconds or more answers, fails or times out. not when you stop it.':
     'تنبيه لما طلب أخد 30 ثانية أو أكتر يرد أو يفشل أو وقته يخلص. مش لما توقفه إنت.',
   progress: 'التقدم',
+  'claude subagents': 'الـ subagents بتاعة Claude',
+  'pick a model for each subagent type': 'اختار موديل لكل نوع subagent',
+  'only when claude names no model itself. a rule here outranks the agent’s own model setting. forks always keep the session’s model.':
+    'بس لما Claude ما يحددش موديل بنفسه. القاعدة هنا بتغلب الموديل اللي في تعريف الـ agent. الـ forks دايماً بتفضل على موديل الـ session.',
+  'explore (search)': 'Explore (البحث)',
+  'any other type': 'أي نوع تاني',
+  'its own or the session’s': 'موديله أو موديل الـ session',
+  'no subagents in this session yet.': 'لسه مفيش subagents في الـ session دي.',
   'no output yet': 'لسه مفيش output',
   'a toast at 80% and 95% of a window the provider reports, and when it reports a block.': 'تنبيه عند 80% و95% من أي حد الـ provider بيعلنه، ولما يعلن إنه اتقفل.',
   '🔒 changing files always asks first. read-only requests run in an empty folder.': '🔒 تغيير الملفات دايماً بيسأل الأول. طلبات القراية بتشتغل في فولدر فاضي.',
@@ -238,6 +246,7 @@ const PATTERNS: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^Running (.+) · (.+)$/, m => `شغال من ${m[1]} · ${m[2]}`],
   [/^(.+) received · last output (.+)$/, m => `وصل ${m[1]} · آخر output ${tr(m[2]!)}`],
   [/^(.+) received · no output yet$/, m => `وصل ${m[1]} · لسه مفيش output`],
+  [/^This session · (\d+) subagents?$/, m => `الـ session دي · ${m[1]} subagent`],
 ]
 
 /** The Arabic for one label, or the label itself where there is none. */

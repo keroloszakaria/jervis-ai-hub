@@ -8,6 +8,7 @@ import type { EngineInterface, Elements } from 'claude-code'
 
 import type { Activity, Limits, ModelInfo, PaneUi, Progress, Route, Settings, Task } from '../types'
 import { clearActivity, exportActivity, snip, stats } from './activity'
+import { SUBAGENT_MODELS, SUBAGENT_TYPES, recentSpawns, subagentModels } from './subagents'
 import { runDiagnostics } from './diagnostics'
 import { refreshAllLimits, refreshLimits } from './limits'
 import { STATUS_COLOR, connect, disconnect, status, test } from './health'
@@ -58,6 +59,7 @@ const k = (n: number | undefined): string =>
   n === undefined ? '–' : n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
 const yesNo = (v: boolean | undefined): string => (v === undefined ? 'not reported' : v ? 'yes' : 'no')
 const cap = (s: string): string => `${s[0]?.toUpperCase() ?? ''}${s.slice(1)}`
+const SPAWN_SOURCE = { rule: 'your rule', caller: 'Claude chose', inherited: 'its own or the session’s' } as const
 const shortModel = (id: string): string => id.replace(/^.*\//, '')
 
 const PILL: Record<Status, string> = {
@@ -1221,6 +1223,8 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
 
   // ---------- Settings ----------
   const { routes, profile } = await activeRoutes($)
+  const sub = subagentModels(st)
+  const spawned = await recentSpawns($)
   const isSmart = st.smartRouting !== false
   const routeOptions = [{ value: 'auto', label: isSmart ? 'Smart pick' : 'Automatic' }]
   const picks: Partial<Record<Task, SmartPick | { reason: string }>> = {}
@@ -1339,6 +1343,54 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
             options={['1', '2', '3'].map(v => ({ value: v, label: `${v} other provider${v === '1' ? '' : 's'}` }))}
             onSelect={v => void saveSettings($, s => ({ ...s, maxFallbacks: Number(v) }))}
           />
+        )}
+      </Box>
+
+      <Heading title="Claude subagents" />
+      <Box key="subagent-card" {...CARD}>
+        <Toggle
+          id="subagent-models"
+          on={sub.isOn}
+          label="Pick a model for each subagent type"
+          hint="Only when Claude names no model itself. A rule here outranks the agent’s own model setting. Forks always keep the session’s model."
+          onPress={() => void saveSettings($, s => ({ ...s, subagentModels: { ...subagentModels(s), isOn: !subagentModels(s).isOn } }))}
+        />
+        {sub.isOn
+          ? SUBAGENT_TYPES.map(t => (
+              <Pick
+                id={`subagent-${t.id}`}
+                label={t.label}
+                value={sub.rules[t.id] ?? 'keep'}
+                options={[
+                  { value: 'keep', label: 'Its own or the session’s' },
+                  ...SUBAGENT_MODELS.map(m => ({ value: m, label: cap(m) })),
+                ]}
+                onSelect={v =>
+                  void saveSettings($, s => {
+                    const cur = subagentModels(s)
+                    const rules = { ...cur.rules }
+                    if (v === 'keep') delete rules[t.id]
+                    else rules[t.id] = v
+                    return { ...s, subagentModels: { ...cur, rules } }
+                  })
+                }
+              />
+            ))
+          : null}
+        {spawned.length ? (
+          <Box flexDirection="column" marginTop="sm">
+            <Text dimColor>{`This session · ${spawned.length} subagent${spawned.length === 1 ? '' : 's'}`}</Text>
+            {spawned
+              .slice(-5)
+              .reverse()
+              .map(x => (
+                <Text size="footnote" mono dimColor>
+                  {snip(`${x.type} → ${x.model} · ${SPAWN_SOURCE[x.source]} · ${ago(now, x.at)}`, IN)}
+                </Text>
+              ))}
+          </Box>
+        ) : (
+          <Hint text="No subagents in this session yet." />
         )}
       </Box>
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0
+
+- **A model for each Claude subagent type:** Settings → Claude subagents picks the model each type of subagent runs on, for example Explore on Haiku, general-purpose on Sonnet and Plan on Opus, plus one for any other type. A rule applies only when Claude names no model itself, and it outranks the model in the agent's own definition. Forks, resumed subagents and workflow agents are left alone. It is off until you turn it on.
+- **What each subagent ran on:** the same card lists this session's last subagents with the model Claude Code reports for each and who chose it: your rule, Claude, or the agent's own or the session's model.
+
 ## 0.6.0
 
 - **Live progress:** a running request on the Activity tab shows how long it has run and how much output its CLI has written so far. Open the row to see when the CLI last wrote anything, so a request that has gone quiet is easy to spot. Only sizes and times are shown, never what the CLI wrote. Progress is kept for the session only and updates once a second.

@@ -117,6 +117,8 @@ export type Settings = {
   limitAlerts?: boolean
   /** a toast when a request that ran 30 seconds or more ends; on when absent */
   doneAlerts?: boolean
+  /** the model each type of Claude subagent runs on when Claude names none */
+  subagentModels?: SubagentModels
   /** the pane's language; English when absent */
   language?: 'en' | 'ar'
   fallback: boolean
@@ -128,6 +130,26 @@ export type Settings = {
   retentionDays: number
   useProjectProfile: boolean
   profiles: Record<string, Routes>
+}
+
+/**
+ * Rules for Claude's own subagents. A rule applies only when the Agent call
+ * names no model; `'*'` is every type without a rule of its own.
+ */
+export type SubagentModels = {
+  isOn: boolean
+  /** subagent type (or '*') -> model alias (haiku, sonnet, opus, ...) */
+  rules: Record<string, string>
+}
+
+/** One subagent this session started, and what it ran on. */
+export type Spawn = {
+  at: number
+  type: string
+  /** the model the engine reports the subagent runs on */
+  model: string
+  /** who chose it: a hub rule, Claude's own call, or nobody (its definition or the session's model) */
+  source: 'rule' | 'caller' | 'inherited'
 }
 
 /** How far a running request has got, as its CLI's output shows; kept for this session only. */
@@ -200,6 +222,7 @@ export type HubActivity = Activity
 export type HubPaneUi = PaneUi
 export type HubLimits = Limits
 export type HubProgress = Progress
+export type HubSpawn = Spawn
 
 declare module 'claude-code' {
   interface PluginState {
@@ -214,6 +237,7 @@ declare module 'claude-code' {
       cwd: Shaped<string>
       limits: Shaped<Record<string, HubLimits>>
       progress: Shaped<Record<string, HubProgress>>
+      spawns: Shaped<HubSpawn[]>
     }
   }
 }

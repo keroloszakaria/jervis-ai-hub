@@ -14,6 +14,7 @@ import { isModelListStale, refreshModels } from './models'
 import { forgetOtherSessions, sessionKey } from './permissions'
 import { PROVIDERS, TASKS, provider } from './registry'
 import { STORE, loadPersisted, saveConfig } from './state'
+import { currentRules, recordSpawn, ruleFor } from './subagents'
 import { BG, renderPane } from './ui'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
@@ -195,6 +196,23 @@ export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     const r = await next(e)
     if (e.changed.includes('rateLimits')) void refreshClaudeLimits($, e.rateLimits).catch(() => undefined)
+    return r
+  })
+
+  // Claude's own subagents: a rule picks the model when Claude names none.
+  // Nothing here may throw after next(e), or the spawn would be asked twice.
+  on('agent.spawn', async ($, e, next) => {
+    let model: string | undefined
+    try {
+      model = ruleFor(await currentRules($), e)
+    } catch {
+      model = undefined
+    }
+    const r = await next(model ? { ...e, model } : e)
+    if (r.deny === undefined && !e.fork && !e.resume && !e.workflow) {
+      const source = model ? 'rule' : e.model ? 'caller' : 'inherited'
+      void recordSpawn($, { type: e.subagentType, model: r.model, source }).catch(() => undefined)
+    }
     return r
   })
 
