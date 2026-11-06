@@ -4,7 +4,6 @@ import type { EngineInterface } from 'claude-code'
 import type { Kind, Mode, Usage } from '../types'
 import { homeDir, joinPath, osName, tempDir } from './platform'
 
-export const TIMEOUT = 10 * 60 * 1000
 /** Windows caps a command line near 32k characters (and other systems cap it too); agy takes its prompt as an argument. */
 export const MAX_ARG_PROMPT = 30_000
 
@@ -23,22 +22,91 @@ async function firstExisting($: EngineInterface, paths: string[]): Promise<strin
   return undefined
 }
 
-/** Resolves a command through `where` (Windows) or `which`, skipping .cmd shims that may point at removed builds. */
+/**
+ * A CLI that npm installed as a Node script runs as `node <script>`: the
+ * command line that starts it, by the script's path. Every other CLI starts
+ * by its own path.
+ */
+const launchers = new Map<string, string[]>()
+export const argvOf = (path: string): string[] => launchers.get(path) ?? [path]
+
+/**
+ * What an npm `.cmd` shim starts, read from the shim instead of running it
+ * through a shell: a native `.exe` it names, or a Node script with the node
+ * it would use. A shim whose target is gone (a removed build) gives nothing.
+ */
+export async function throughShim($: EngineInterface, shim: string): Promise<string | undefined> {
+  let text: string
+  try {
+    text = await $.fs.read(shim)
+  } catch {
+    return undefined
+  }
+  const dir = dirOf(shim)
+  const targets = [...text.matchAll(/"%~?dp0%?\\?([^"%]+)"/gi)]
+    .map(m => `${dir}\\${(m[1] ?? '').replace(/^\\+/, '')}`)
+    .filter(t => !/\\node(\.exe)?$/i.test(t))
+  const target = targets[targets.length - 1]
+  if (!target || !(await $.fs.exists(target).catch(() => false))) return undefined
+  if (/\.exe$/i.test(target)) return target
+  const local = `${dir}\\node.exe`
+  const node = (await $.fs.exists(local).catch(() => false)) ? local : await onPath($, 'node')
+  if (!node) return undefined
+  launchers.set(target, [node, target])
+  return target
+}
+
+/** Resolves a command through `where` (Windows) or `which`; a .cmd shim is followed to what it starts. */
 export async function onPath($: EngineInterface, name: string): Promise<string | undefined> {
   for (const argv of [['where', name], ['which', name]]) {
     try {
       const r = await $.process.run(argv, { timeoutMs: 10_000 })
-      const line = r.stdout
-        .split(/\r?\n/)
-        .map(l => l.trim())
-        .find(l => l && !/\.(cmd|bat)$/i.test(l))
-      if (r.exitCode === 0 && line) return line
+      if (r.exitCode !== 0) continue
+      const lines = r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+      const direct = lines.find(l => !/\.(cmd|bat)$/i.test(l))
+      if (direct) return direct
+      if (name === 'node') continue
+      for (const shim of lines.filter(l => /\.cmd$/i.test(l))) {
+        const found = await throughShim($, shim)
+        if (found) return found
+      }
     } catch {
       // try the next
     }
   }
   return undefined
 }
+
+/** How long a request may run before it is stopped: a test is short, a write gets the most. */
+export function timeoutFor(type: string, mode: Mode): number {
+  if (type === 'test') return 2 * 60_000
+  if (mode === 'write') return 10 * 60_000
+  return 5 * 60_000
+}
+
+export type ErrorKind = 'auth' | 'limit' | 'network' | 'timeout' | 'cancelled' | 'unavailable' | 'unknown'
+
+/** What kind of failure a CLI's message describes; the words are a hint, so anything else is `unknown`. */
+export function classifyError(message: string): ErrorKind {
+  const m = message.toLowerCase()
+  if (/rate.?limit|\b429\b|quota|usage limit|too many requests|limit reached|insufficient (balance|credit)/.test(m)) return 'limit'
+  if (/\b401\b|\b403\b|unauthori[sz]ed|not logged in|not signed in|log ?in again|invalid (api )?key|authenticat/.test(m)) return 'auth'
+  if (/enotfound|econnrefused|econnreset|etimedout|getaddrinfo|socket hang up|fetch failed|network|\b50[234]\b|service unavailable/.test(m)) return 'network'
+  return 'unknown'
+}
+
+export const ERROR_LABEL: Record<ErrorKind, string> = {
+  auth: 'sign-in problem',
+  limit: 'limit reached',
+  network: 'network problem',
+  timeout: 'timed out',
+  cancelled: 'stopped',
+  unavailable: 'not available',
+  unknown: 'error',
+}
+
+/** Whether a failed read-only request may go on to another provider: not after a stop or a timeout. */
+export const mayFallBack = (kind: ErrorKind | undefined): boolean => kind !== 'cancelled' && kind !== 'timeout'
 
 /** Where a kind's CLI lives on this machine, or undefined when it is not installed. */
 export async function exe($: EngineInterface, kind: Kind): Promise<string | undefined> {
@@ -106,17 +174,17 @@ export function invocation(
 ): Invocation {
   if (kind === 'codex') {
     return {
-      argv: [path, 'exec', '--json', '--skip-git-repo-check', '-s', mode === 'write' ? 'workspace-write' : 'read-only', ...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []), '-'],
+      argv: [...argvOf(path), 'exec', '--json', '--skip-git-repo-check', '-s', mode === 'write' ? 'workspace-write' : 'read-only', ...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []), '-'],
       stdin: prompt,
     }
   }
   if (kind === 'agy') {
     return {
-      argv: [path, '--output-format', 'json', ...(model ? ['--model', model] : []), ...(mode === 'write' ? ['--mode', 'accept-edits'] : []), `-p=${prompt}`],
+      argv: [...argvOf(path), '--output-format', 'json', ...(model ? ['--model', model] : []), ...(mode === 'write' ? ['--mode', 'accept-edits'] : []), `-p=${prompt}`],
     }
   }
   return {
-    argv: [path, 'run', '--standalone', '--format', 'json', ...(model ? ['-m', model] : []), ...(mode === 'write' ? ['--auto'] : [])],
+    argv: [...argvOf(path), 'run', '--standalone', '--format', 'json', ...(model ? ['-m', model] : []), ...(mode === 'write' ? ['--auto'] : [])],
     stdin: prompt,
   }
 }

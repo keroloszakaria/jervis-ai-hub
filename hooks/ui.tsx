@@ -7,15 +7,15 @@ import { atom, read } from 'claude-code'
 import type { EngineInterface, Elements } from 'claude-code'
 
 import type { Activity, Limits, ModelInfo, PaneUi, Route, Settings, Task } from '../types'
-import { clearActivity, snip, stats } from './activity'
+import { clearActivity, exportActivity, snip, stats } from './activity'
 import { runDiagnostics } from './diagnostics'
 import { refreshAllLimits, refreshLimits } from './limits'
 import { STATUS_COLOR, connect, disconnect, status, test } from './health'
 import type { Status } from './health'
-import { CAPABILITIES, EFFORT_LABEL, capabilityList, favKey, hasCapability, refreshModels, resolveModel } from './models'
+import { CAPABILITIES, EFFORT_LABEL, capabilityList, favKey, hasCapability, isModelListStale, refreshModels, resolveModel } from './models'
 import { AUTH_LABEL, PROVIDERS, TASKS, provider } from './registry'
 import type { ProviderEntry } from './registry'
-import { usageLine, usd } from './requests'
+import { runningIds, stopRequest, usageLine, usd } from './requests'
 import { activeRoutes } from './routing'
 import { smartPick } from './smart'
 import type { SmartPick } from './smart'
@@ -575,6 +575,9 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
             <Hint text={`${EFFORT_LABEL(info.defaultEffort)} is the CLI’s default.`} />
           </Box>
         ) : null}
+        {list?.loadedAt !== undefined ? (
+          <Hint text={`Model list updated ${ago(now, list.loadedAt)}${isModelListStale(list, now) ? ' · out of date' : ''}`} />
+        ) : null}
         {list?.error ? <Text color="error">{snip(`Models: ${list.error}`, IN * 2)}</Text> : null}
       </Box>
     )
@@ -1031,6 +1034,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
     const types = ['all', 'ask', 'compare', 'test', 'delegate'] as const
     const filter = u.actFilter ?? 'all'
     const rows = log.filter(a => filter === 'all' || a.type === filter).slice(-40).reverse()
+    const live = new Set(runningIds())
     const isWide = W >= 50
     const failed = log.filter(a => a.state === 'error').length
     const done = log.filter(a => a.ms !== undefined && a.state === 'ok')
@@ -1120,7 +1124,25 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
 
         <Heading
           title={`Requests · ${log.length}`}
-          right={log.length > 0 ? <Button key="clear" plain dimColor label="Clear" onPress={() => void clearActivity($)} /> : undefined}
+          right={
+            log.length > 0 ? (
+              <Box flexDirection="row" gap="xs">
+                <Button
+                  key="export"
+                  plain
+                  dimColor
+                  label="Export"
+                  onPress={() =>
+                    void exportActivity($).then(
+                      path => $.ui.toast(`Activity exported (metadata only): ${path}`),
+                      error => $.ui.toast(`Jervis AI Hub: export failed: ${error instanceof Error ? error.message : String(error)}`),
+                    )
+                  }
+                />
+                <Button key="clear" plain dimColor label="Clear" onPress={() => void clearActivity($)} />
+              </Box>
+            ) : undefined
+          }
         />
         <Box key="requests-card" {...CARD}>
         <Box flexDirection="row" flexWrap="wrap" gap="xs">
@@ -1157,6 +1179,9 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
                     <Text size="footnote" mono dimColor tabular>
                       {time}
                     </Text>
+                    {a.state === 'running' && live.has(a.id) ? (
+                      <Button key={`stop-${a.id}`} variant="secondary" label="Stop" onPress={() => void stopRequest(a.id)} />
+                    ) : null}
                     <Button key={`act-${a.id}`} plain dimColor label={isOpen ? 'Hide' : '›'} onPress={() => void setUi($, x => ({ ...x, activityOpen: isOpen ? undefined : a.id }))} />
                   </Box>
                 </Box>

@@ -6,7 +6,7 @@ import { atom, read } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import { checkAuth, forgetCredential, promptAndStoreKey } from './auth'
-import { clean, errText, exe } from './cli'
+import { argvOf, clean, errText, exe } from './cli'
 import { refreshModels } from './models'
 import { provider } from './registry'
 import { runRequest } from './requests'
@@ -87,7 +87,7 @@ export async function test($: EngineInterface, id: string): Promise<void> {
 async function signInCodex($: EngineInterface, id: string, path: string): Promise<boolean> {
   await note($, id, 'Starting the official ChatGPT sign-in… finish it in your browser.')
   try {
-    for await (const chunk of $.process.spawn({ argv: [path, 'login'] })) {
+    for await (const chunk of $.process.spawn({ argv: [...argvOf(path), 'login'] })) {
       const url = /https?:\/\/[^\s'"]+/.exec(clean(chunk.text))?.[0]
       if (url) await note($, id, 'Finish signing in to ChatGPT in your browser:', false, url)
     }

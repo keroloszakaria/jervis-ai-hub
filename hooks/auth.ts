@@ -7,7 +7,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { AuthState } from '../types'
-import { clean, errText, exe, onPath } from './cli'
+import { argvOf, clean, errText, exe, onPath } from './cli'
 import { type OsName, osName } from './platform'
 import type { ProviderEntry } from './registry'
 import { STORE } from './state'
@@ -275,14 +275,14 @@ export async function checkAuth(
   if (!path) return { state: 'not-installed', message: `The ${p.kind === 'codex' ? 'Codex' : p.kind === 'agy' ? 'agy' : 'OpenCode'} CLI is not installed.` }
   try {
     if (p.kind === 'codex') {
-      const r = await $.process.run([path, 'login', 'status'], { timeoutMs: 30_000 })
+      const r = await $.process.run([...argvOf(path), 'login', 'status'], { timeoutMs: 30_000 })
       const text = clean(r.stdout + '\n' + r.stderr)
       return /logged in/i.test(text) && !/not logged in/i.test(text)
         ? { state: 'authenticated', message: text.split('\n')[0] ?? 'Signed in' }
         : { state: 'signed-out', message: 'Not signed in to Codex.' }
     }
     if (p.kind === 'agy') {
-      const r = await $.process.run([path, 'models'], { timeoutMs: 60_000 })
+      const r = await $.process.run([...argvOf(path), 'models'], { timeoutMs: 60_000 })
       return r.exitCode === 0 && clean(r.stdout).includes('\t')
         ? { state: 'authenticated', message: 'agy lists its models for this account.' }
         : { state: 'signed-out', message: 'agy is not signed in: run `agy` once in a terminal and sign in.' }

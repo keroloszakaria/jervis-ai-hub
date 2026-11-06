@@ -3,6 +3,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { Activity } from '../types'
+import { joinPath, osName, tempDir } from './platform'
 import { STORE, DEFAULT_SETTINGS } from './state'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
@@ -88,6 +89,51 @@ export async function finish(
 export async function clearActivity($: EngineInterface): Promise<void> {
   await update($, activity, () => [])
   await persist($)
+}
+
+/** One row of an export: what ran and how it went, never the prompt, the answer or an error's text. */
+export const exportRow = (a: Activity) => ({
+  at: new Date(a.at).toISOString(),
+  type: a.type,
+  provider: a.provider,
+  model: a.model ?? null,
+  effort: a.effort ?? null,
+  task: a.task ?? null,
+  mode: a.mode,
+  state: a.state,
+  ms: a.ms ?? null,
+  promptChars: a.promptChars,
+  inputTokens: a.usage?.inputTokens ?? null,
+  outputTokens: a.usage?.outputTokens ?? null,
+  costUsd: a.usage?.costUsd ?? null,
+  fallbackFrom: a.fallbackFrom ?? null,
+})
+
+/**
+ * Writes the activity log as Markdown and JSON to the hub's folder in the
+ * system temp folder, and answers the Markdown file's path. Only metadata
+ * leaves: no prompt, answer, preview or error text.
+ */
+export async function exportActivity($: EngineInterface): Promise<string> {
+  const rows = (await read($, activity)).map(exportRow)
+  const os = await osName($)
+  const stamp = new Date(await $.clock.now()).toISOString().replace(/[:.]/g, '-')
+  const base = joinPath(os, await tempDir($), 'jervis-ai-hub', 'exports', `activity-${stamp}`)
+  const cell = (v: unknown): string => (v === null ? '' : String(v).replace(/\|/g, '/'))
+  const cols = ['at', 'type', 'provider', 'model', 'effort', 'task', 'mode', 'state', 'ms', 'inputTokens', 'outputTokens', 'costUsd'] as const
+  const md = [
+    '# Jervis AI Hub activity',
+    '',
+    `${rows.length} requests. Metadata only: prompts, answers and error text are not included.`,
+    '',
+    `| ${cols.join(' | ')} |`,
+    `| ${cols.map(() => '---').join(' | ')} |`,
+    ...rows.map(r => `| ${cols.map(c => cell(r[c])).join(' | ')} |`),
+    '',
+  ].join('\n')
+  await $.fs.write(`${base}.json`, `${JSON.stringify(rows, null, 2)}\n`)
+  await $.fs.write(`${base}.md`, md)
+  return `${base}.md`
 }
 
 export type ProviderStats = {

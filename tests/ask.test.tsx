@@ -1,5 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
+import { classifyError, mayFallBack, timeoutFor } from '../hooks/cli'
+import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
 import { DEFAULT_SETTINGS } from '../hooks/state'
 
@@ -41,6 +43,14 @@ type World = {
   session?: string
   /** answers to the next questions, in order; then `answer` */
   answers?: string[]
+  /** the provider CLI never answers (until stopped) */
+  hang?: boolean
+  instantTimeout?: boolean
+  exists?: (path: string) => boolean
+  written?: Record<string, string>
+  /** npm shims on PATH instead of the installed CLIs */
+  shims?: Record<string, string>
+  files?: Record<string, string>
 }
 
 /** reads a PowerShell -EncodedCommand back into its script (UTF-16LE, base64) */
@@ -97,8 +107,11 @@ function engine(on: any, w: World) {
       : { value: e.name === 'TEMP' ? 'C:\\Temp' : 'C:\\Local' },
   )
   on('fs.list', () => ({ value: [{ name: 'abc', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }))
-  on('fs.exists', () => ({ value: true }))
-  on('fs.write', () => ({ value: undefined }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: w.exists ? w.exists(e.path) : true }))
+  on('fs.write', (_: unknown, e: { path: string; content?: string; text?: string; data?: string }) => {
+    ;(w.written ??= {})[e.path] = String(e.content ?? e.text ?? e.data ?? '')
+    return { value: undefined }
+  })
   on('clock.now', () => ({ value: 1_000_000 }))
   on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [] } }))
   on('http.fetch', (_: unknown, e: { url: string; init?: { headers?: Record<string, string> } }) => {
@@ -118,10 +131,31 @@ function engine(on: any, w: World) {
     w.asked.push(q)
     return { result: { questions: e.questions, answers: { [q]: w.answers?.shift() ?? w.answer } } }
   })
-  on('process.run', (_: unknown, e: { argv: string[]; init?: { cwd?: string; env?: Record<string, string>; stdin?: string } }) => {
-    const run: Run = { argv: [...e.argv], cwd: e.init?.cwd, env: e.init?.env, stdin: e.init?.stdin }
+  on('process.run', (_: unknown, e: { argv: string[]; init?: { cwd?: string; env?: Record<string, string>; stdin?: string } }) =>
+    respond(w, { argv: [...e.argv], cwd: e.init?.cwd, env: e.init?.env, stdin: e.init?.stdin }),
+  )
+  on('process.spawn', async function* (_: unknown, e: { argv: string[]; cwd?: string; env?: Record<string, string>; input?: string }) {
+    const r = respond(w, { argv: [...e.argv], cwd: e.cwd, env: e.env, stdin: e.input }).value
+    if (w.hang && (e.argv[1] === 'exec' || e.argv[1] === 'run')) await new Promise(() => undefined)
+    if (r.stdout) yield { stream: 'stdout' as const, text: r.stdout }
+    if (r.stderr) yield { stream: 'stderr' as const, text: r.stderr }
+    return { value: { code: r.exitCode, signal: null } }
+  })
+  // the request deadline: at once when the test wants a timeout, otherwise never
+  on('clock.sleep', () => (w.instantTimeout ? { value: undefined } : new Promise(() => undefined)))
+  on('fs.read', (_: unknown, e: { path: string }) => {
+    const f = w.files?.[e.path]
+    if (f === undefined) throw new Error('ENOENT')
+    return { value: f }
+  })
+}
+
+function respond(w: World, run: Run) {
+  {
+    const e = { argv: run.argv }
     w.ran.push(run)
     const a = e.argv.join(' ')
+    if ((e.argv[0] === 'where' || e.argv[0] === 'which') && w.shims?.[e.argv[1] ?? '']) return ok(`${w.shims[e.argv[1]!]}\n`)
     if (e.argv[0] === 'where' || e.argv[0] === 'which') return ok('', 'not found', 1)
     if (e.argv[0] === 'uname') return ok('Darwin\n')
     if (e.argv[0] === 'osascript') return ok(`${SECRET}\n`)
@@ -155,7 +189,7 @@ function engine(on: any, w: World) {
       return ok(JSON.stringify({ status: 'SUCCESS', response: '', command: { name: 'usage', data: { groups: [{ name: 'Gemini Models', buckets: [{ window: 'weekly', remaining_fraction: 0.85, reset_time: '1970-01-01T00:30:00Z' }, { window: '5h', remaining_fraction: 0.4, reset_time: '1970-01-01T00:20:00Z' }] }] } } }))
     }
     return ok('{"status":"SUCCESS","response":"agy answer","usage":{"input_tokens":5,"output_tokens":1}}')
-  })
+  }
 }
 
 const world = (store: Record<string, unknown> = {}): World => ({
@@ -560,4 +594,161 @@ test('writes never share a run, and a different task is its own request', async 
 
 test('connecting sends no test prompt unless the person turned that on', async () => {
   expect(DEFAULT_SETTINGS.verifyOnConnect).toBe(false)
+})
+
+const execs = (w: World) => w.ran.filter(x => x.argv[1] === 'exec').length
+
+test('a model list older than a day is read again at start; a fresh one is not', async ($, on) => {
+  const day = 24 * 60 * 60 * 1000
+  expect(isModelListStale(undefined, 0)).toBe(true)
+  expect(isModelListStale({ models: [{ id: 'm', label: 'm', source: 'cli-list' as const }], isLoading: false, loadedAt: 0 }, day + 1)).toBe(true)
+  expect(isModelListStale({ models: [{ id: 'm', label: 'm', source: 'cli-list' as const }], isLoading: false, loadedAt: 0 }, day - 1)).toBe(false)
+
+  const old = { chatgpt: { models: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol' }], isLoading: false, loadedAt: 1_000_000 - 2 * day } }
+  const w = world({ ...LEGACY(), 'hub-models-v2': old })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  expect(w.ran.some(x => x.argv.includes('debug') && x.argv.includes('models'))).toBe(true)
+})
+
+test('a fresh model list is kept as it is at start', async ($, on) => {
+  const fresh = { chatgpt: { models: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol' }], isLoading: false, loadedAt: 1_000_000 } }
+  const w = world({ ...LEGACY(), 'hub-models-v2': fresh })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  expect(w.ran.some(x => x.argv.includes('debug') && x.argv.includes('models'))).toBe(false)
+})
+
+test('each kind of request has its own deadline; a timeout is reported and not fallen back from', async ($, on) => {
+  expect(timeoutFor('test', 'read')).toBe(120_000)
+  expect(timeoutFor('ask', 'read')).toBe(300_000)
+  expect(timeoutFor('ask', 'write')).toBe(600_000)
+
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, fallback: true, maxFallbacks: 1 } })
+  w.hang = true
+  w.instantTimeout = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'slow' } as never)
+  expect(JSON.stringify(r)).toContain('stopped after 5 minutes')
+  expect(w.ran.some(x => x.argv[1] === 'run')).toBe(false)
+  const log = w.store['hub-activity-v1'] as { state: string }[]
+  expect(log[log.length - 1]?.state).toBe('error')
+})
+
+test('Stop ends a running request, which reads as stopped and is not retried', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, fallback: true, maxFallbacks: 1 } })
+  w.hang = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const call = $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'long' } as never)
+  await settle()
+  const log = w.store['hub-activity-v1'] as { id: string; state: string }[]
+  const id = log[log.length - 1]!.id
+  const ui = await $.ui.mount({ ...PANE(), surface: 'desktop' })
+  await ui.press({ key: 'tab-activity' })
+  await ui.press({ key: `stop-${id}` })
+  const r = await call
+  expect(JSON.stringify(r)).toContain('stopped by the person')
+  expect((w.store['hub-activity-v1'] as { state: string }[]).pop()?.state).toBe('cancelled')
+  expect(w.ran.some(x => x.argv[1] === 'run')).toBe(false)
+  expect(await ui.find({ key: `stop-${id}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('failures are named by kind, and only a stop or a timeout ends the fallback', async ($, on) => {
+  expect(classifyError('429 Too Many Requests')).toBe('limit')
+  expect(classifyError('You have hit your usage limit')).toBe('limit')
+  expect(classifyError('401 invalid key')).toBe('auth')
+  expect(classifyError('getaddrinfo ENOTFOUND api.example.com')).toBe('network')
+  expect(classifyError('boom')).toBe('unknown')
+  expect(mayFallBack('limit')).toBe(true)
+  expect(mayFallBack('unknown')).toBe(true)
+  expect(mayFallBack('timeout')).toBe(false)
+  expect(mayFallBack('cancelled')).toBe(false)
+
+  const w = world(LEGACY())
+  w.leakKeyInStderr = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', prompt: 'hi' } as never)
+  expect(JSON.stringify(r)).toContain('(sign-in problem)')
+})
+
+test('a CLI installed by npm is run through the script its shim names, never through a shell', async ($, on) => {
+  const w = world(LEGACY())
+  w.shims = { opencode: 'C:\\npm\\opencode.cmd' }
+  w.files = {
+    'C:\\npm\\opencode.cmd':
+      '@ECHO off\r\nIF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n)\r\n"%_prog%"  "%dp0%\\node_modules\\opencode-ai\\bin\\opencode.js" %*\r\n',
+  }
+  const real = new Set(['C:\\npm\\node.exe', 'C:\\npm\\node_modules\\opencode-ai\\bin\\opencode.js'])
+  w.exists = path => !path.includes('opencodedesktop') && (real.has(path) || !path.startsWith('C:\\npm'))
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', prompt: 'hi' } as never)
+  const run = w.ran.find(x => x.argv[2] === 'run')
+  expect(run?.argv[0]).toBe('C:\\npm\\node.exe')
+  expect(run?.argv[1]).toBe('C:\\npm\\node_modules\\opencode-ai\\bin\\opencode.js')
+  expect(w.ran.some(x => /cmd(\.exe)?$/i.test(x.argv[0] ?? '') || x.argv[0]?.endsWith('.cmd'))).toBe(false)
+})
+
+test('a shim whose script is gone does not count as installed', async ($, on) => {
+  const w = world(LEGACY())
+  w.shims = { opencode: 'C:\\npm\\opencode.cmd' }
+  w.files = { 'C:\\npm\\opencode.cmd': '"%_prog%"  "%dp0%\\node_modules\\opencode-ai\\bin\\opencode.js" %*\r\n' }
+  w.exists = path => !path.includes('opencodedesktop') && !path.startsWith('C:\\npm')
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', prompt: 'hi' } as never)
+  expect(w.ran.some(x => x.argv.includes('run'))).toBe(false)
+  expect(JSON.stringify(r)).toMatch(/not (found|installed)/)
+})
+
+test('a preview shows the route and access and sends nothing', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const before = w.ran.length
+  const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'code', prompt: 'refactor this', cwd: 'C:\\proj', preview: true } as never)
+  const text = JSON.stringify(r)
+  expect(text).toContain('Preview: nothing was sent.')
+  expect(text).toContain('Provider: ')
+  expect(text).toContain('reads C:')
+  expect(w.ran.length).toBe(before)
+  expect(w.asked.length).toBe(0)
+
+  const c = (await $.command.run({ command: 'ask-ai', args: 'chatgpt --preview what is this' } as never)) as { text?: string }
+  expect(c.text).toContain('Preview: nothing was sent.')
+  expect(c.text).toContain('Prompt: 12 characters')
+  expect(w.ran.length).toBe(before)
+})
+
+test('export writes metadata only, never the prompt or the answer', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, recordPreviews: true } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'TOPSECRETPROMPT' } as never)
+  const ui = await $.ui.mount({ ...PANE(), surface: 'desktop' })
+  await ui.press({ key: 'tab-activity' })
+  await ui.press({ key: 'export' })
+  await settle()
+  const files = Object.entries(w.written ?? {}).filter(([k]) => k.includes('exports'))
+  expect(files.some(([k]) => k.endsWith('.md'))).toBe(true)
+  expect(files.some(([k]) => k.endsWith('.json'))).toBe(true)
+  const all = files.map(([, v]) => v).join('\n')
+  expect(all).toContain('chatgpt')
+  expect(all).not.toContain('TOPSECRETPROMPT')
+  expect(all).not.toContain('OK')
+  expect(w.toasts.some(t => t.includes('Activity exported'))).toBe(true)
+  await ui.unmount()
 })

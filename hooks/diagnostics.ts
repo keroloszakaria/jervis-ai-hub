@@ -3,13 +3,13 @@ import type { EngineInterface } from 'claude-code'
 
 import type { DiagRow, Kind } from '../types'
 import { secureStorageStatus } from './auth'
-import { clean, errText, exe, onPath } from './cli'
+import { argvOf, clean, errText, exe, onPath } from './cli'
 import { delegationSupport } from './delegation'
 import { setUi } from './state'
 
 async function version($: EngineInterface, path: string): Promise<string> {
   try {
-    const r = await $.process.run([path, '--version'], { timeoutMs: 20_000 })
+    const r = await $.process.run([...argvOf(path), '--version'], { timeoutMs: 20_000 })
     return clean(r.stdout || r.stderr).split('\n')[0] ?? ''
   } catch (error) {
     return errText(error)

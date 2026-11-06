@@ -6,6 +6,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Capability, Route, Routes, Task } from '../types'
 import { hasCapability } from './models'
+import { mayFallBack } from './cli'
 import { allowProjectRead } from './permissions'
 import { PROVIDERS } from './registry'
 import { type RequestResult, readiness, runRequest } from './requests'
@@ -98,7 +99,8 @@ export async function askWithFallback(
   const tried: string[] = []
   let r = await runRequest($, { providerId: first.provider, model: first.model, effort: first.effort, prompt, mode: 'read', cwd: projectDir, type: 'ask', task })
   tried.push(first.provider)
-  if (r.isOk || !s.fallback) return { ...r, tried }
+  // a stop or a timeout ends the request: the person is waiting, and the plan was already used
+  if (r.isOk || !s.fallback || !mayFallBack(r.errorKind)) return { ...r, tried }
   for (const id of await candidates($)) {
     if (tried.length - 1 >= s.maxFallbacks) break
     if (tried.includes(id)) continue
@@ -111,7 +113,7 @@ export async function askWithFallback(
     if (projectDir && !(await allowProjectRead($, id, projectDir))) return { ...r, tried, declined: id }
     r = await runRequest($, { providerId: id, model, effort, prompt, mode: 'read', cwd: projectDir, type: 'ask', task, fallbackFrom: tried[tried.length - 1] })
     tried.push(id)
-    if (r.isOk) break
+    if (r.isOk || !mayFallBack(r.errorKind)) break
   }
   return { ...r, tried }
 }

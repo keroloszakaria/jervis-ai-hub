@@ -7,6 +7,7 @@ A Claude Code mod that connects your other AI subscriptions and API keys (ChatGP
 - **Smart pick:** with a task and no provider, the hub picks the best connected model and effort, using only what each source reports and each provider's remaining limits. A fallback or a comparison uses each provider's best model too.
 - **Limits:** Codex plan windows, Antigravity `/usage`, your Claude session's windows, and the balance endpoints of DeepSeek, OpenRouter, Moonshot and SiliconFlow. Nothing is estimated. A toast warns at 80% and 95% of a window.
 - **Cost:** for API-key providers, the cost OpenCode recorded for each request, per provider and in total.
+- **Control:** stop a running request from the Activity tab; each kind of request has its own deadline; `/ask-ai --preview …` (or `preview: true`) shows the route and access without sending anything; export the activity log (metadata only).
 - **Languages:** English or Arabic (Settings → Language).
 - **Security:** API keys are typed into a masked system dialog and kept in the system's secure storage: Windows DPAPI, the macOS Keychain, or the Linux Secret Service. They are never shown, logged, put on a command line or stored in plain text.
 

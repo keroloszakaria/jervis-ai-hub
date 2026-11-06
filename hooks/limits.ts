@@ -10,7 +10,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { LimitWindow, Limits } from '../types'
 import { powershell, revealForRequest } from './auth'
-import { errText, exe, sandboxDir } from './cli'
+import { argvOf, errText, exe, sandboxDir } from './cli'
 import { osName } from './platform'
 import { provider } from './registry'
 import { DEFAULT_SETTINGS } from './state'
@@ -33,10 +33,11 @@ const CODEX_LINES = [
 ]
 
 /** Starts `codex app-server`, asks for the rate limits once, prints that one reply, and stops it. */
-const codexScript = (path: string): string => `${UTF8_OUT}$ErrorActionPreference = 'Stop'
+const psQuote = (s: string): string => s.replace(/'/g, "''")
+const codexScript = (argv: string[]): string => `${UTF8_OUT}$ErrorActionPreference = 'Stop'
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = '${path.replace(/'/g, "''")}'
-$psi.Arguments = 'app-server'
+$psi.FileName = '${psQuote(argv[0] ?? '')}'
+$psi.Arguments = '${psQuote([...argv.slice(1).map(a => `"${a}"`), 'app-server'].join(' '))}'
 $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $true
 $psi.RedirectStandardOutput = $true
@@ -82,7 +83,7 @@ async function readCodex($: EngineInterface, now: number): Promise<Limits> {
   if (!path) return { at: now, state: 'error', source: 'Codex CLI', error: 'the Codex CLI is not installed' }
   let out: string
   if ((await osName($)) === 'windows') {
-    out = (await powershell($, codexScript(path), undefined, 40_000)).out
+    out = (await powershell($, codexScript(argvOf(path)), undefined, 40_000)).out
   } else {
     // stdin stays open a few seconds so the server answers before it sees the end
     const r = await $.process.run(['sh', '-c', 'p="$1"; shift; { printf \'%s\\n\' "$@"; sleep 12; } | "$p" app-server', 'sh', path, ...CODEX_LINES], { timeoutMs: 40_000 })
@@ -114,7 +115,7 @@ async function readCodex($: EngineInterface, now: number): Promise<Limits> {
 async function readAgy($: EngineInterface, now: number): Promise<Limits> {
   const path = await exe($, 'agy')
   if (!path) return { at: now, state: 'error', source: 'agy CLI', error: 'the agy CLI is not installed' }
-  const r = await $.process.run([path, '-p', '/usage', '--output-format', 'json'], { cwd: await sandboxDir($), timeoutMs: 60_000 })
+  const r = await $.process.run([...argvOf(path), '-p', '/usage', '--output-format', 'json'], { cwd: await sandboxDir($), timeoutMs: 60_000 })
   let body: Record<string, unknown> | undefined
   try {
     body = obj(JSON.parse(r.stdout.trim()))

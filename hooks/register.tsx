@@ -10,7 +10,7 @@ import { askTool, compareTool, delegateTool } from './actions'
 import { protectLegacyKey } from './auth'
 import { checkAllAuth, connect } from './health'
 import { refreshAllLimits, refreshClaudeLimits } from './limits'
-import { refreshModels } from './models'
+import { isModelListStale, refreshModels } from './models'
 import { forgetOtherSessions, sessionKey } from './permissions'
 import { PROVIDERS, TASKS, provider } from './registry'
 import { STORE, loadPersisted, saveConfig } from './state'
@@ -92,6 +92,10 @@ async function registerTools($: EngineInterface): Promise<void> {
           description: 'Optional reasoning effort (e.g. low, medium, high), only for models that list levels; defaults to the one picked in the hub',
         },
         cwd: { type: 'string', description: 'Optional project folder the provider may access' },
+        preview: {
+          type: 'boolean',
+          description: 'true: only show which provider, model, effort, access and fallback the request would use; nothing is sent',
+        },
       },
       required: ['prompt'],
     },
@@ -136,10 +140,12 @@ async function registerTools($: EngineInterface): Promise<void> {
 export async function parseAskArgs(
   $: EngineInterface,
   args: string,
-): Promise<{ provider?: string; task?: Task; prompt: string; connected: string[] }> {
+): Promise<{ provider?: string; task?: Task; prompt: string; connected: string[]; preview: boolean }> {
   const cfg = await read($, config)
   const live = PROVIDERS.filter(p => cfg[p.id]?.isConnected && cfg[p.id]?.isEnabled)
-  const words = args.trim().split(/\s+/).filter(Boolean)
+  const all = args.trim().split(/\s+/).filter(Boolean)
+  const preview = all.includes('--preview')
+  const words = all.filter(w => w !== '--preview')
   let providerId: string | undefined
   let task: Task | undefined
   for (let i = 0; i < 2 && words.length; i++) {
@@ -151,7 +157,7 @@ export async function parseAskArgs(
     else break
     words.shift()
   }
-  return { provider: providerId, task, prompt: words.join(' '), connected: live.map(p => p.id) }
+  return { provider: providerId, task, prompt: words.join(' '), connected: live.map(p => p.id), preview }
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : undefined)
@@ -170,7 +176,7 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'ask-ai',
-      description: 'Ask a connected AI directly: /ask-ai [provider] [task] your question (read-only, only the question is sent)',
+      description: 'Ask a connected AI directly: /ask-ai [provider] [task] [--preview] your question (read-only, only the question is sent)',
     })
     await registerTools($)
     void $.ui.open({ id: PANE, title: TITLE, backgroundColor: BG })
@@ -179,7 +185,9 @@ export const register: Register = on => {
     void refreshAllLimits($).catch(() => undefined)
     const cfg = await read($, config)
     const lists = await read($, models)
-    for (const p of PROVIDERS) if (cfg[p.id]?.isConnected && !lists[p.id]?.models.length) void refreshModels($, p.id)
+    // a missing list, or one older than a day, is read again in the background; the old one shows meanwhile
+    const now = await $.clock.now()
+    for (const p of PROVIDERS) if (cfg[p.id]?.isConnected && isModelListStale(lists[p.id], now)) void refreshModels($, p.id)
     return ran
   })
 
@@ -208,12 +216,13 @@ export const register: Register = on => {
     if (!parsed.prompt) {
       return {
         text:
-          'Usage: /ask-ai [provider] [task] your question\n' +
+          'Usage: /ask-ai [provider] [task] [--preview] your question\n' +
           `Providers: ${parsed.connected.join(', ') || 'none connected yet (open /ai-providers)'}\n` +
           `Tasks: ${TASKS.map(t => t.id).join(', ')}. With neither, the hub picks the best connected model.`,
       }
     }
-    const r = await askTool($, { provider: parsed.provider, task: parsed.task, prompt: parsed.prompt, mode: 'read' })
+    const r = await askTool($, { provider: parsed.provider, task: parsed.task, prompt: parsed.prompt, mode: 'read', preview: parsed.preview })
+    if (parsed.preview) return { text: r.text }
     return { text: r.text, context: [`The person asked another AI through /ask-ai. Its answer:\n${r.text}`] }
   })
 
@@ -230,6 +239,7 @@ export const register: Register = on => {
       model: str(a.model),
       effort: str(a.effort),
       cwd: str(a.cwd),
+      preview: a.preview === true,
     })
     return r.isOk ? { result: r.text } : { deny: r.text }
   })

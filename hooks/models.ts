@@ -4,9 +4,9 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Capability, ModelInfo } from '../types'
+import type { Capability, ModelInfo, ModelList } from '../types'
 import { revealForRequest } from './auth'
-import { clean, errText, exe } from './cli'
+import { argvOf, clean, errText, exe } from './cli'
 import { provider } from './registry'
 import type { ProviderEntry } from './registry'
 import { STORE, saveConfig, setModels } from './state'
@@ -125,7 +125,7 @@ async function discover($: EngineInterface, p: ProviderEntry): Promise<ModelInfo
   if (!path) throw new Error('CLI not installed')
 
   if (p.kind === 'codex') {
-    const r = await $.process.run([path, 'debug', 'models'], { timeoutMs: 60_000 })
+    const r = await $.process.run([...argvOf(path), 'debug', 'models'], { timeoutMs: 60_000 })
     const json = JSON.parse(r.stdout) as {
       models?: {
         slug?: string
@@ -159,7 +159,7 @@ async function discover($: EngineInterface, p: ProviderEntry): Promise<ModelInfo
   }
 
   if (p.kind === 'agy') {
-    const r = await $.process.run([path, 'models'], { timeoutMs: 60_000 })
+    const r = await $.process.run([...argvOf(path), 'models'], { timeoutMs: 60_000 })
     const listed = clean(r.stdout)
       .split('\n')
       .map(l => l.split('\t'))
@@ -174,7 +174,7 @@ async function discover($: EngineInterface, p: ProviderEntry): Promise<ModelInfo
     if (!key) throw new Error('no API key saved')
     env = { [p.envVar]: key }
   }
-  const r = await $.process.run([path, 'models', '--standalone'], { timeoutMs: 120_000, env })
+  const r = await $.process.run([...argvOf(path), 'models', '--standalone'], { timeoutMs: 120_000, env })
   env = undefined
   const prefix = `${p.ocProvider}/`
   const ids = clean(r.stdout)
@@ -202,6 +202,13 @@ async function discover($: EngineInterface, p: ProviderEntry): Promise<ModelInfo
     }
   })
 }
+
+/** A model list older than this is read again when a session starts. */
+export const MODELS_TTL_MS = 24 * 60 * 60 * 1000
+
+/** Whether a provider's list is missing or older than a day (a list that never loaded counts as stale). */
+export const isModelListStale = (list: ModelList | undefined, now: number): boolean =>
+  !list?.models.length || list.loadedAt === undefined || now - list.loadedAt > MODELS_TTL_MS
 
 /** Refreshes one provider's model list; keeps the old list on failure. */
 export async function refreshModels($: EngineInterface, id: string): Promise<void> {

@@ -7,7 +7,7 @@ import type { EngineInterface } from 'claude-code'
 import type { ActivityType, Mode, Task, Usage } from '../types'
 import { begin, finish, redact } from './activity'
 import { revealForRequest } from './auth'
-import { MAX_ARG_PROMPT, TIMEOUT, errText, exe, invocation, parse, parseOpencodeExport, sandboxDir } from './cli'
+import { ERROR_LABEL, type ErrorKind, MAX_ARG_PROMPT, argvOf, classifyError, errText, exe, invocation, parse, parseOpencodeExport, sandboxDir, timeoutFor } from './cli'
 import { resolveModel } from './models'
 import { sessionKey } from './permissions'
 import { provider } from './registry'
@@ -26,6 +26,8 @@ export type RequestResult = {
   text: string
   ms: number
   usage?: Usage
+  /** what kind of failure this was, when it failed */
+  errorKind?: ErrorKind
 }
 
 export type RequestArgs = {
@@ -44,6 +46,62 @@ export type RequestArgs = {
 
 /** Identical requests in flight share one run, so a double press or a retried tool call sends nothing twice. */
 const inFlight = new Map<string, Promise<RequestResult>>()
+
+/** The stop handle of each request still running, by its activity id. */
+const running = new Map<string, () => void>()
+
+/** Stops a running request: its CLI is ended and the request reads as stopped. False when it is not running. */
+export function stopRequest(activityId: string): boolean {
+  const stop = running.get(activityId)
+  stop?.()
+  return Boolean(stop)
+}
+
+/** Activity ids of the requests running now. */
+export const runningIds = (): string[] => [...running.keys()]
+
+type Ran = { exitCode: number; stdout: string; stderr: string; ended: 'exit' | 'timeout' | 'cancelled' }
+
+const CAP = 4 * 1024 * 1024
+
+/**
+ * Runs one CLI and reads what it writes, until it exits, its deadline passes
+ * or the person stops it. Leaving the stream ends the child.
+ */
+async function runStoppable(
+  $: EngineInterface,
+  activityId: string,
+  req: { argv: string[]; cwd: string; env?: Record<string, string>; input?: string },
+  timeoutMs: number,
+): Promise<Ran> {
+  const stream = $.process.spawn(req)
+  let stop: (why: 'timeout' | 'cancelled') => void = () => undefined
+  const stopped = new Promise<'timeout' | 'cancelled'>(resolve => (stop = resolve))
+  running.set(activityId, () => stop('cancelled'))
+  const timer = new AbortController()
+  void $.clock.sleep(timeoutMs, { signal: timer.signal }).then(
+    () => stop('timeout'),
+    () => undefined,
+  )
+  let stdout = ''
+  let stderr = ''
+  try {
+    for (;;) {
+      const step = await Promise.race([stream.next(), stopped])
+      if (typeof step === 'string') {
+        void stream.return(undefined as never).catch(() => undefined)
+        return { exitCode: 1, stdout, stderr, ended: step }
+      }
+      if (step.done) return { exitCode: step.value.code ?? 1, stdout, stderr, ended: 'exit' }
+      if (step.value.stream === 'stdout') {
+        if (stdout.length < CAP) stdout += step.value.text
+      } else if (stderr.length < CAP) stderr += step.value.text
+    }
+  } finally {
+    timer.abort()
+    running.delete(activityId)
+  }
+}
 
 /** Whether a provider may take a request now: connected, on, installed and signed in. */
 export async function readiness($: EngineInterface, id: string): Promise<string | undefined> {
@@ -77,7 +135,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
   const wanted = a.effort ?? (model === c?.model ? c?.effort : undefined)
   const pick = resolveModel((await read($, models))[a.providerId]?.models, model, wanted)
   const effort = pick.effort
-  const fail = (text: string): RequestResult => ({ isOk: false, provider: a.providerId, model, effort, text, ms: 0 })
+  const fail = (text: string): RequestResult => ({ isOk: false, provider: a.providerId, model, effort, text, ms: 0, errorKind: 'unavailable' })
   if (!p) return fail(`Unknown provider "${a.providerId}".`)
   const blocked = await readiness($, a.providerId)
   if (blocked) return fail(blocked)
@@ -108,18 +166,24 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     }
     const { argv, stdin } = invocation(p.kind, path, a.prompt, a.mode, pick.cliModel, pick.effortArg)
     const runDir = a.cwd ?? (await sandboxDir($))
-    const r = await $.process.run(argv, {
-      stdin,
-      env,
-      cwd: runDir,
-      timeoutMs: TIMEOUT,
-    })
+    const timeoutMs = timeoutFor(a.type, a.mode)
+    const r = await runStoppable($, id, { argv, input: stdin, env, cwd: runDir }, timeoutMs)
     env = undefined
+    if (r.ended !== 'exit') {
+      const ms = (await $.clock.now()) - started
+      const why =
+        r.ended === 'cancelled'
+          ? 'stopped by the person'
+          : `stopped after ${Math.round(timeoutMs / 60_000)} minutes without finishing`
+      const left = a.mode === 'write' ? ' Changes it made so far stay in the folder for review; nothing was retried.' : ''
+      await finish($, id, { state: r.ended === 'cancelled' ? 'cancelled' : 'error', ms, error: why })
+      return { isOk: false, provider: a.providerId, model, effort, text: `${p.label}: ${why}.${left}`, ms, errorKind: r.ended }
+    }
     const parsed = parse(p.kind, r.stdout, r.stderr, r.exitCode)
     // OpenCode prints no usage in its run output; it records tokens and cost on the session
     if (parsed.isOk && parsed.sessionId && (p.kind === 'opencode-key' || p.kind === 'opencode-free')) {
       try {
-        const x = await $.process.run([path, 'session', 'export', parsed.sessionId], { cwd: runDir, timeoutMs: 30_000 })
+        const x = await $.process.run([...argvOf(path), 'session', 'export', parsed.sessionId], { cwd: runDir, timeoutMs: 30_000 })
         if (x.exitCode === 0) parsed.usage = parseOpencodeExport(x.stdout) ?? parsed.usage
       } catch {
         // the answer stands without usage
@@ -127,7 +191,10 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     }
     const ms = (await $.clock.now()) - started
     const secrets = secret ? [secret] : []
-    const text = parsed.isOk ? parsed.text : redact(`${p.label} failed: ${parsed.error ?? 'unknown error'}`, secrets)
+    const errorKind = parsed.isOk ? undefined : classifyError(parsed.error ?? '')
+    const text = parsed.isOk
+      ? parsed.text
+      : redact(`${p.label} failed (${ERROR_LABEL[errorKind ?? 'unknown']}): ${parsed.error ?? 'unknown error'}`, secrets)
     await finish(
       $,
       id,
@@ -146,12 +213,12 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
       // the plan's windows moved: read them again (local, no prompt sent)
       if (p.kind === 'codex') void refreshLimits($, a.providerId).catch(() => undefined)
     }
-    return { isOk: parsed.isOk, provider: a.providerId, model, effort, text, ms, usage: parsed.usage }
+    return { isOk: parsed.isOk, provider: a.providerId, model, effort, text, ms, usage: parsed.usage, errorKind }
   } catch (error) {
     const ms = (await $.clock.now()) - started
     const message = redact(errText(error), secret ? [secret] : [])
     await finish($, id, { state: 'error', ms, error: message })
-    return { isOk: false, provider: a.providerId, model, effort, text: `${p.label} could not run: ${message}`, ms }
+    return { isOk: false, provider: a.providerId, model, effort, text: `${p.label} could not run: ${message}`, ms, errorKind: classifyError(message) }
   } finally {
     secret = undefined
   }
