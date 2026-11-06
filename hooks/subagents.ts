@@ -25,9 +25,12 @@ export const SUBAGENT_TYPES = [
 export const DEFAULT_SUBAGENT_MODELS: SubagentModels = {
   isOn: false,
   rules: { Explore: 'haiku', 'general-purpose': 'sonnet', Plan: 'opus' },
+  byLevel: { light: 'haiku', standard: 'sonnet', heavy: 'opus' },
 }
 
-export const subagentModels = (s: Settings): SubagentModels => s.subagentModels ?? DEFAULT_SUBAGENT_MODELS
+/** The person's rules; settings saved before levels existed get the default model for each level. */
+export const subagentModels = (s: Settings): SubagentModels =>
+  s.subagentModels ? { ...s.subagentModels, byLevel: s.subagentModels.byLevel ?? DEFAULT_SUBAGENT_MODELS.byLevel } : DEFAULT_SUBAGENT_MODELS
 
 /** What the spawn hook needs from `agent.spawn`'s input. */
 export type SpawnFacts = {

@@ -5,16 +5,19 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Capability, Limits, ModelInfo, Route, Task } from '../types'
-import { EFFORT_ORDER, hasCapability } from './models'
+import type { Capability, Level, Limits, ModelInfo, Route, Task } from '../types'
+import { effortForLevel, nearLevel, rate } from './levels'
+import { EFFORT_ORDER, favKey, hasCapability } from './models'
 import { provider } from './registry'
 import { readiness } from './requests'
+import { DEFAULT_SETTINGS } from './state'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
 const config = atom({ plugin: 'ai-subscriptions', key: 'config' } as const, {}, { shape: 'cfg-3' })
 const health = atom({ plugin: 'ai-subscriptions', key: 'health' } as const, {}, { shape: 'h-1' })
 const limits = atom({ plugin: 'ai-subscriptions', key: 'limits' } as const, {}, { shape: 'l-1' })
 const models = atom({ plugin: 'ai-subscriptions', key: 'models' } as const, {}, { shape: 'm-2' })
+const settings = atom({ plugin: 'ai-subscriptions', key: 'settings' } as const, DEFAULT_SETTINGS, { shape: 'st-1' })
 
 export type SmartPick = { route: Route; reason: string; label: string }
 
@@ -50,8 +53,24 @@ function usedFor(l: Limits | undefined, m: ModelInfo | undefined): number | unde
 export async function smartPick(
   $: EngineInterface,
   task: Task,
-  opts: { only?: string; needs?: Capability[] } = {},
+  opts: { only?: string; needs?: Capability[]; level?: Level } = {},
 ): Promise<SmartPick | { reason: string }> {
+  if (!opts.level) return pickOnce($, task, opts)
+  const exact = await pickOnce($, task, opts)
+  if ('route' in exact) return exact
+  // nothing ready serves that level: the one next to it, said in the reason
+  const near = nearLevel(opts.level)
+  const other = await pickOnce($, task, { ...opts, level: near })
+  return 'route' in other ? { ...other, reason: `${other.reason} (no ready model serves ${opts.level} work, so ${near})` } : exact
+}
+
+async function pickOnce(
+  $: EngineInterface,
+  task: Task,
+  opts: { only?: string; needs?: Capability[]; level?: Level },
+): Promise<SmartPick | { reason: string }> {
+  const level = opts.level
+  const set = (await read($, settings)).levels ?? {}
   const cfg = await read($, config)
   const hl = await read($, health)
   const lims = await read($, limits)
@@ -72,6 +91,8 @@ export async function smartPick(
     for (const m of pool) {
       if (m && needs.some(c => hasCapability(m, c) !== true)) continue
       if (!m && needs.length) continue
+      // a level asks for a model whose reported facts (or the person's choice) serve it
+      if (level && (!m || !rate(m, set[favKey(id, m.id)]).levels.includes(level))) continue
       const used = usedFor(l, m)
       if (used !== undefined && used >= 98) continue
       const why: string[] = []
@@ -100,6 +121,28 @@ export async function smartPick(
           why.push('low effort')
         }
       }
+      if (level && m) {
+        const r = rate(m, set[favKey(id, m.id)])
+        if (r.isSet) {
+          score += 3
+          why.push(`you set it ${level}`)
+        }
+        if (level === 'heavy' && thinks(m)) {
+          score += 3
+          why.push('reasoning')
+        }
+        if (level === 'heavy' && m.efforts?.some(e => e === 'xhigh' || e === 'max')) score += 1
+        if (level === 'heavy' && m.contextWindow && m.contextWindow >= 200_000) score += 1
+        if (level === 'light' && !thinks(m)) {
+          score += 2
+          why.push('no reasoning')
+        }
+        if (level === 'light' && m.efforts?.some(e => e === 'low' || e === 'minimal')) {
+          score += 1
+          why.push('low effort')
+        }
+        if (level === 'standard' && m.toolCalling) score += 1
+      }
       if (isInUse) {
         score += task === 'general' ? 3 : 1
         if (task === 'general') why.push('your chosen model')
@@ -119,7 +162,7 @@ export async function smartPick(
       cands.push({ id, m, score, why, cost })
     }
   }
-  if (task === 'fast' && costs.length > 1) {
+  if ((task === 'fast' || level === 'light') && costs.length > 1) {
     const max = Math.max(...costs)
     for (const c of cands) {
       if (c.cost === undefined || max <= 0) continue
@@ -128,14 +171,16 @@ export async function smartPick(
     }
   }
   if (!cands.length) {
+    if (level) return { reason: `no ready model${opts.only ? ` of ${provider(opts.only)?.label ?? opts.only}` : ''} serves ${level} work` }
     return { reason: needs.length ? `no ready model reports ${needs.join(', ')}` : opts.only ? `${provider(opts.only)?.label ?? opts.only} is not ready` : 'no provider is connected and ready' }
   }
   const best = cands.reduce((a, b) => (b.score > a.score ? b : a))
   const p = provider(best.id)
-  const effort = best.m ? effortFor(best.m, task) : undefined
+  const effort = best.m ? (level ? effortForLevel(best.m, level) : effortFor(best.m, task)) : undefined
+  const what = level ? `${level} work${task !== 'general' ? ` (${task})` : ''}` : task
   return {
     route: { provider: best.id, model: best.m?.id, effort },
-    reason: `smart pick for ${task}${best.why.length ? `: ${best.why.join(', ')}` : ''}`,
+    reason: `smart pick for ${what}${best.why.length ? `: ${best.why.join(', ')}` : ''}`,
     label: `${p?.label ?? best.id} · ${best.m?.label ?? 'default model'}${effort ? ` · ${effort}` : ''}`,
   }
 }

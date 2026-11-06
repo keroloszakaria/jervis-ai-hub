@@ -8,6 +8,9 @@ export type AuthMethod = 'subscription' | 'api-key' | 'free'
 
 /** The tasks the routing engine has a default for. */
 export type Task = 'general' | 'code' | 'review' | 'reasoning' | 'fast' | 'vision'
+/** The kind of work a request is: Claude says which when it asks. */
+export type Level = 'light' | 'standard' | 'heavy'
+
 export type Capability = 'image-input' | 'reasoning' | 'tool-calling' | 'web-search' | 'long-context'
 
 /** What the person chose for one provider. Credentials never live here. */
@@ -119,6 +122,10 @@ export type Settings = {
   doneAlerts?: boolean
   /** the model each type of Claude subagent runs on when Claude names none */
   subagentModels?: SubagentModels
+  /** levels the person set by hand, by "provider::model" */
+  levels?: Record<string, Level>
+  /** a short guide in Claude's system prompt: which connected model serves each level; on when absent */
+  levelGuide?: boolean
   /** the pane's language; English when absent */
   language?: 'en' | 'ar'
   fallback: boolean
@@ -140,6 +147,8 @@ export type SubagentModels = {
   isOn: boolean
   /** subagent type (or '*') -> model alias (haiku, sonnet, opus, ...) */
   rules: Record<string, string>
+  /** the Claude model alias for each level, which the guide tells Claude to pass on its Agent calls */
+  byLevel?: Partial<Record<Level, string>>
 }
 
 /** One subagent this session started, and what it ran on. */
@@ -178,6 +187,8 @@ export type PaneUi = {
   modelSearch: string
   modelProvider: string
   modelCap: string
+  /** the Models list's level filter */
+  modelLevel?: 'any' | Level
   favOnly: boolean
   selectedModel?: string
   modelLimit: number

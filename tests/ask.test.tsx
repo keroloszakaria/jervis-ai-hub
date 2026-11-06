@@ -4,6 +4,8 @@ import { classifyError, mayFallBack, timeoutFor } from '../hooks/cli'
 import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
 import { duration, size } from '../hooks/requests'
+import { effortForLevel, levelTag, rate } from '../hooks/levels'
+import type { ModelInfo } from '../types'
 import { DEFAULT_SETTINGS } from '../hooks/state'
 
 declare function setTimeout(fn: () => void, ms: number): unknown
@@ -163,6 +165,7 @@ function engine(on: any, w: World) {
         ? { value: undefined }
         : new Promise(() => undefined),
   )
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'core', scope: 'shared' }] }))
   on('agent.spawn', (_: unknown, e: { subagentType: string; model?: string }) => {
     ;(w.spawned ??= []).push({ subagentType: e.subagentType, model: e.model })
     return { model: e.model === 'haiku' ? 'claude-haiku-5-5' : e.model ?? 'claude-opus-5-5', agentId: `a${w.spawned.length}` }
@@ -908,5 +911,128 @@ test('subagent rules are off until turned on, and the switch is saved', async ($
   expect(saved.subagentModels?.rules.Explore).toBe('haiku')
   await $.agent.spawn(SPAWN('Explore'))
   expect(w.spawned?.at(-1)?.model).toBe('haiku')
+  await ui.unmount()
+})
+
+const M = (x: Partial<ModelInfo> & { id: string }): ModelInfo => ({ label: x.id, source: 'models.dev' as const, ...x })
+
+test('a model’s level comes only from what its source reports, or from the person', () => {
+  expect(rate(M({ id: 'a', efforts: ['low', 'medium', 'high', 'xhigh'] })).levels).toEqual(['light', 'standard', 'heavy'])
+  expect(rate(M({ id: 'b', reasoning: true })).levels).toEqual(['standard', 'heavy'])
+  expect(rate(M({ id: 'c', reasoning: false })).levels).toEqual(['light', 'standard'])
+  expect(rate(M({ id: 'd' })).levels).toEqual([])
+  expect(levelTag(rate(M({ id: 'd' })))).toBe('Unrated')
+  expect(rate(M({ id: 'd' }), 'heavy')).toEqual({ levels: ['heavy'], why: 'your choice', isSet: true })
+  expect(levelTag(rate(M({ id: 'a', efforts: ['low', 'high'] })))).toBe('Light–Heavy')
+  const m = M({ id: 'a', efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'] })
+  expect(effortForLevel(m, 'light')).toBe('low')
+  expect(effortForLevel(m, 'standard')).toBe('medium')
+  expect(effortForLevel(m, 'heavy')).toBe('xhigh')
+})
+
+const LEVEL_MODELS = {
+  chatgpt: { models: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol', efforts: ['low', 'medium', 'high', 'xhigh'], source: 'codex' }], isLoading: false, loadedAt: 1_000_000 },
+  deepseek: {
+    models: [
+      { id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat', reasoning: false, costIn: 0.27, costOut: 1.1, source: 'models.dev' },
+      { id: 'deepseek/deepseek-reasoner', label: 'DeepSeek Reasoner', reasoning: true, costIn: 0.55, costOut: 2.19, source: 'models.dev' },
+    ],
+    isLoading: false,
+    loadedAt: 1_000_000,
+  },
+}
+
+test('a level picks a model and effort that serve it, and says why', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const heavy = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', level: 'heavy', prompt: 'x', preview: true } as never))
+  expect(heavy).toContain('Level: heavy')
+  expect(heavy).toMatch(/smart pick for heavy work/)
+  expect(heavy).toMatch(/effort (xhigh|high)|deepseek-reasoner/)
+  expect(heavy).not.toContain('deepseek-chat')
+
+  // a named provider: its own model for the level
+  const light = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', level: 'light', prompt: 'x', preview: true } as never))
+  expect(light).toContain('deepseek/deepseek-chat')
+  const lightCodex = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', level: 'light', prompt: 'x', preview: true } as never))
+  expect(lightCodex).toContain('effort low')
+})
+
+test('a level set by hand wins, and a level nobody serves falls to the next one, said so', async ($, on) => {
+  const w = world({
+    ...LEGACY(),
+    'hub-models-v2': { deepseek: LEVEL_MODELS.deepseek },
+    'hub-settings-v1': { ...DEFAULT_SETTINGS, levels: { 'deepseek::deepseek/deepseek-chat': 'heavy' } },
+  })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const heavy = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', level: 'heavy', prompt: 'x', preview: true } as never))
+  expect(heavy).toContain('deepseek/deepseek-chat')
+  expect(heavy).toContain('you set it heavy')
+  // the reasoner serves standard and heavy, the chat model now only heavy: light goes to standard
+  const light = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', level: 'light', prompt: 'x', preview: true } as never))
+  expect(light).toContain('deepseek/deepseek-reasoner')
+  expect(light).toContain('no ready model serves light work, so standard')
+})
+
+test('/ask-ai takes a level word', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const c = (await $.command.run({ command: 'ask-ai', args: 'deepseek heavy --preview why is this slow' } as never)) as { text?: string }
+  expect(c.text).toContain('Level: heavy')
+  expect(c.text).toContain('Prompt: 16 characters')
+})
+
+const guideOf = async ($: { prompt: { compose: (e: never) => Promise<{ sections: readonly { id: string; text: string; scope: string }[] }> } }) => {
+  const r = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['desktop'], tools: [], outputStyle: null, traits: [] } as never)
+  return { sections: r.sections, guide: r.sections.find(x => x.id === 'ai-subscriptions:levels') }
+}
+
+test('the routing guide names the levels, the connected AIs and the subagent models, last in the prompt', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const { sections, guide } = await guideOf($ as never)
+  const text = guide?.text ?? ''
+  expect(sections[0]?.id).toBe('intro')
+  expect(sections.at(-1)?.id).toBe('ai-subscriptions:levels')
+  expect(guide?.scope).toBe('session')
+  expect(text).toContain('# Jervis AI Hub: match the model to the work')
+  expect(text).toContain('- light: search')
+  expect(text).toContain('Subagent model: "haiku"')
+  expect(text).toContain('Subagent model: "opus"')
+  expect(text).toContain('ChatGPT (Codex)')
+  // nothing that moves during a conversation, so the prompt cache holds
+  expect(text).not.toMatch(/%|left|limit at/)
+})
+
+test('the routing guide can be turned off', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, levelGuide: false } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const { sections, guide } = await guideOf($ as never)
+  expect(guide).toBeUndefined()
+  expect(sections.length).toBe(1)
+})
+
+test('the Models tab shows each model’s level and filters by it', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const ui = await $.ui.mount({ ...PANE(80), surface: 'desktop' })
+  await ui.press({ key: 'tab-models' })
+  expect(await ui.find({ type: 'Text', text: /^STANDARD–HEAVY$/ })).toBeDefined()
+  expect(await ui.find({ key: 'sel-deepseek::deepseek/deepseek-chat' })).toBeDefined()
+  await ui.select({ key: 'model-level', value: 'heavy' })
+  expect(await ui.find({ key: 'sel-deepseek::deepseek/deepseek-chat' })).toBeUndefined()
+  expect(await ui.find({ key: 'sel-deepseek::deepseek/deepseek-reasoner' })).toBeDefined()
   await ui.unmount()
 })

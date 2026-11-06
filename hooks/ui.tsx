@@ -6,9 +6,10 @@ import { hasArabic, tr } from './i18n'
 import { atom, read } from 'claude-code'
 import type { EngineInterface, Elements } from 'claude-code'
 
-import type { Activity, Limits, ModelInfo, PaneUi, Progress, Route, Settings, Task } from '../types'
+import type { Activity, Level, Limits, ModelInfo, PaneUi, Progress, Route, Settings, Task } from '../types'
 import { clearActivity, exportActivity, snip, stats } from './activity'
 import { SUBAGENT_MODELS, SUBAGENT_TYPES, recentSpawns, subagentModels } from './subagents'
+import { LEVELS, LEVEL_LABEL, LEVEL_USE, levelTag, rate } from './levels'
 import { runDiagnostics } from './diagnostics'
 import { refreshAllLimits, refreshLimits } from './limits'
 import { STATUS_COLOR, connect, disconnect, status, test } from './health'
@@ -886,6 +887,8 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
   // ---------- Models ----------
   if (u.tab === 'models') {
     type Row = { p: ProviderEntry; m: ModelInfo }
+    const setLevels = st.levels ?? {}
+    const subLevels = subagentModels(st).byLevel ?? {}
     const q = u.modelSearch.trim().toLowerCase()
     const rows: Row[] = []
     for (const p of connected) {
@@ -895,6 +898,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
         if (q && !m.label.toLowerCase().includes(q) && !m.id.toLowerCase().includes(q)) continue
         if (u.modelCap !== 'any' && hasCapability(m, u.modelCap as (typeof CAPABILITIES)[number]['id']) !== true) continue
         if (u.favOnly && !favs.includes(favKey(p.id, m.id))) continue
+        if (u.modelLevel && u.modelLevel !== 'any' && !rate(m, setLevels[favKey(p.id, m.id)]).levels.includes(u.modelLevel)) continue
         own.push({ p, m })
       }
       // within a provider: the one in use, then favorites, then the source's order
@@ -922,7 +926,22 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           ) : null}
           {m.status ? <KV label="Status" value={m.status} color="warning" /> : null}
           <KV label="Source" value={m.source === 'cli-list' ? 'CLI list (no metadata)' : m.source} />
+          <KV label="Level" value={`${levelTag(rate(m, setLevels[fk]))} · ${rate(m, setLevels[fk]).why}`} />
         </Box>
+        <Pick
+          id={`level-${fk}`}
+          label="Set level"
+          value={setLevels[fk] ?? 'auto'}
+          options={[{ value: 'auto', label: 'From what its source reports' }, ...LEVELS.map(l => ({ value: l, label: `${LEVEL_LABEL[l]} only` }))]}
+          onSelect={v =>
+            void saveSettings($, s => {
+              const levels = { ...(s.levels ?? {}) }
+              if (v === 'auto') delete levels[fk]
+              else levels[fk] = v as Level
+              return { ...s, levels }
+            })
+          }
+        />
         <Pick
           id={`task-${fk}`}
           label="Default for"
@@ -968,10 +987,29 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           options={[{ value: 'any', label: 'Any' }, ...CAPABILITIES.map(c => ({ value: c.id, label: c.label }))]}
           onSelect={v => void setUi($, x => ({ ...x, modelCap: v, modelLimit: 25 }))}
         />
+        <Pick
+          id="model-level"
+          label="Level"
+          value={u.modelLevel ?? 'any'}
+          options={[{ value: 'any', label: 'Any' }, ...LEVELS.map(l => ({ value: l, label: LEVEL_LABEL[l] }))]}
+          onSelect={v => void setUi($, x => ({ ...x, modelLevel: v as PaneUi['modelLevel'], modelLimit: 25 }))}
+        />
         <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginTop="sm" gap={1}>
           <Hint text={loading.length ? `Loading ${loading.join(', ')}…` : 'Only what each source reports.'} />
           <Button key="fav-only" label={u.favOnly ? '★ Favorites' : '☆ Favorites'} variant={u.favOnly ? 'primary' : 'secondary'} onPress={() => void setUi($, x => ({ ...x, favOnly: !x.favOnly }))} />
         </Box>
+        </Box>
+        <Box key="claude-models" {...CARD} marginTop="md">
+          <Box flexDirection="row" alignItems="center" gap="sm" paddingX="sm" marginBottom="xs">
+            <Text weight="bold">Claude subagents</Text>
+            <Text size="caption" mono color={NEON}>
+              YOUR SESSION
+            </Text>
+          </Box>
+          {LEVELS.filter(l => !u.modelLevel || u.modelLevel === 'any' || u.modelLevel === l).map(l => (
+            <KV label={LEVEL_LABEL[l]} value={subLevels[l] ? cap(subLevels[l]!) : 'the session’s model'} />
+          ))}
+          <Hint text="Set these in Settings → Claude subagents." />
         </Box>
         {connected.length === 0 && <Hint text="Connect a provider to see its models." />}
         {connected.length > 0 && rows.length === 0 && loading.length === 0 && <Hint text="No model matches these filters." />}
@@ -991,7 +1029,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
                 const isFav = favs.includes(fk)
                 const isSel = u.selectedModel === fk
                 const inUse = cfg[p.id]?.model === m.id
-                const tag = inUse ? '● In use' : m.efforts?.length ? `${m.efforts.length} efforts` : m.contextWindow ? k(m.contextWindow) : ''
+                const tag = inUse ? '● In use' : levelTag(rate(m, setLevels[fk]))
                 return (
                   <Box flexDirection="column">
                     <Box key={`row-${fk}`} flexDirection="row" justifyContent="space-between" paddingX="sm" paddingY="xs" alignItems="center" gap={1} hover={{ backgroundColor: ROW_HOVER }}>
@@ -1349,9 +1387,34 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
       <Heading title="Claude subagents" />
       <Box key="subagent-card" {...CARD}>
         <Toggle
+          id="level-guide"
+          on={st.levelGuide !== false}
+          label="Tell Claude which model suits which work"
+          hint="A short guide in Claude’s system prompt: the three levels, your connected AIs and the subagent model for each level. New sessions pick up a change."
+          onPress={() => void saveSettings($, s => ({ ...s, levelGuide: s.levelGuide === false }))}
+        />
+        {LEVELS.map(l => (
+          <Pick
+            id={`sublevel-${l}`}
+            label={`${LEVEL_LABEL[l]} work`}
+            value={sub.byLevel?.[l] ?? 'keep'}
+            options={[{ value: 'keep', label: 'The session’s model' }, ...SUBAGENT_MODELS.map(m => ({ value: m, label: cap(m) }))]}
+            onSelect={v =>
+              void saveSettings($, s => {
+                const cur = subagentModels(s)
+                const byLevel = { ...(cur.byLevel ?? {}) }
+                if (v === 'keep') delete byLevel[l]
+                else byLevel[l] = v
+                return { ...s, subagentModels: { ...cur, byLevel } }
+              })
+            }
+          />
+        ))}
+        <Hint text={LEVELS.map(l => `${LEVEL_LABEL[l]}: ${LEVEL_USE[l]}`).join(' · ')} />
+        <Toggle
           id="subagent-models"
           on={sub.isOn}
-          label="Pick a model for each subagent type"
+          label="Also pick a model for each subagent type"
           hint="Only when Claude names no model itself. A rule here outranks the agent’s own model setting. Forks always keep the session’s model."
           onPress={() => void saveSettings($, s => ({ ...s, subagentModels: { ...subagentModels(s), isOn: !subagentModels(s).isOn } }))}
         />

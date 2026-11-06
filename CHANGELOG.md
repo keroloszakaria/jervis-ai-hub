@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0
+
+- **Levels of work:** every model now shows the level of work it serves: light (search, lookups, summaries), standard (everyday code) or heavy (hard bugs, architecture, reviews). The level comes only from what the model's source reports: a model with effort levels spans several levels by its effort, a reasoning model serves standard and heavy, a model reported without reasoning serves light and standard, and a model whose source reports neither is marked Unrated. You can set any model's level by hand from its details.
+- **Route by level:** `ask_ai` and `compare_ai` take `level`, and `/ask-ai` takes `light`, `standard` or `heavy` as a word. The hub then picks a model and an effort that serve that level, within each provider's reported limits. When no ready model serves the level, it uses the next one and says so.
+- **Claude knows the levels:** a short guide in Claude's system prompt names the three levels, the AIs you connected and the Claude subagent model for each level (Haiku, Sonnet and Opus by default, changed in Settings → Claude subagents). It holds nothing that changes during a conversation, so the prompt cache holds. New sessions pick up a change. Turn it off in the same card.
+- **Models tab:** a Level filter, each model's level on its row, and a card with the Claude subagent model for each level.
+
 ## 0.7.0
 
 - **A model for each Claude subagent type:** Settings → Claude subagents picks the model each type of subagent runs on, for example Explore on Haiku, general-purpose on Sonnet and Plan on Opus, plus one for any other type. A rule applies only when Claude names no model itself, and it outranks the model in the agent's own definition. Forks, resumed subagents and workflow agents are left alone. It is off until you turn it on.

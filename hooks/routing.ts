@@ -4,7 +4,7 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Capability, Route, Routes, Task } from '../types'
+import type { Capability, Level, Route, Routes, Task } from '../types'
 import { hasCapability } from './models'
 import { mayFallBack } from './cli'
 import { allowProjectRead } from './permissions'
@@ -51,16 +51,19 @@ export async function route(
   $: EngineInterface,
   task: Task,
   needs: Capability[] = task === 'vision' ? ['image-input'] : [],
+  level?: Level,
+  isTaskNamed = true,
 ): Promise<{ route?: Route; reason: string }> {
   const { routes, profile } = await activeRoutes($)
   const ready = await candidates($)
-  const rule = routes[task]
+  // a level with no task named goes by the level, not by the rule for general questions
+  const rule = level && !isTaskNamed ? undefined : routes[task]
   if (rule && ready.includes(rule.provider)) {
     return { route: rule, reason: `${profile === 'global' ? 'routing rule' : 'project rule'} for ${task}` }
   }
   const s = await read($, settings)
   if (s.smartRouting !== false) {
-    const pick = await smartPick($, task, { needs })
+    const pick = await smartPick($, task, { needs, level })
     return 'route' in pick ? { route: pick.route, reason: pick.reason } : { reason: pick.reason }
   }
   const all = await read($, models)
@@ -94,6 +97,7 @@ export async function askWithFallback(
   prompt: string,
   task: Task | undefined,
   projectDir: string | undefined,
+  level?: Level,
 ): Promise<RequestResult & { tried: string[]; declined?: string }> {
   const s = await read($, settings)
   const tried: string[] = []
@@ -105,7 +109,7 @@ export async function askWithFallback(
     if (tried.length - 1 >= s.maxFallbacks) break
     if (tried.includes(id)) continue
     // that provider's best model for the task, skipping one whose models are all at their limit
-    const pick = s.smartRouting !== false ? await smartPick($, task ?? 'general', { only: id }) : undefined
+    const pick = s.smartRouting !== false ? await smartPick($, task ?? 'general', { only: id, level }) : undefined
     if (pick && !('route' in pick)) continue
     const best = pick ? (pick as SmartPick).route : undefined
     const model = best?.model

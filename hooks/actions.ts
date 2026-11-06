@@ -3,7 +3,7 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Task } from '../types'
+import type { Level, Task } from '../types'
 import { errText, timeoutFor } from './cli'
 import { delegate } from './delegation'
 import { allowProjectRead, allowWrite } from './permissions'
@@ -27,22 +27,22 @@ export type ToolAnswer = { isOk: boolean; text: string }
 /** ask_ai: one provider (named, or routed by task), read-only unless write was asked and confirmed. */
 export async function askTool(
   $: EngineInterface,
-  a: { provider?: string; task?: Task; prompt: string; mode: 'read' | 'write'; model?: string; effort?: string; cwd?: string; preview?: boolean },
+  a: { provider?: string; task?: Task; level?: Level; prompt: string; mode: 'read' | 'write'; model?: string; effort?: string; cwd?: string; preview?: boolean },
 ): Promise<ToolAnswer> {
   let providerId = a.provider
   let model = a.model
   let effort = a.effort
   let why = ''
   if (!providerId) {
-    const r = await route($, a.task ?? 'general')
+    const r = await route($, a.task ?? 'general', undefined, a.level, Boolean(a.task))
     if (!r.route) return { isOk: false, text: `No provider to route to: ${r.reason}. Connect one in Jervis AI Hub.` }
     providerId = r.route.provider
     model ??= r.route.model
     effort ??= r.route.effort
     why = r.reason
-  } else if (!model && a.task && a.task !== 'general' && (await read($, settings)).smartRouting !== false) {
-    // a named provider and a task: the best of that provider's models for it
-    const pick = await smartPick($, a.task, { only: providerId })
+  } else if (!model && ((a.task && a.task !== 'general') || a.level) && (await read($, settings)).smartRouting !== false) {
+    // a named provider and a task or level: the best of that provider's models for it
+    const pick = await smartPick($, a.task ?? 'general', { only: providerId, level: a.level })
     if ('route' in pick) {
       model = pick.route.model
       effort ??= pick.route.effort
@@ -65,7 +65,7 @@ export async function askTool(
   if (a.cwd && !(await allowProjectRead($, providerId, a.cwd))) {
     return { isOk: false, text: 'The person declined project access: nothing was sent.' }
   }
-  const r = await askWithFallback($, { provider: providerId, model, effort }, a.prompt, a.task, a.cwd)
+  const r = await askWithFallback($, { provider: providerId, model, effort }, a.prompt, a.task, a.cwd, a.level)
   const via = `${why ? `\n(${why})` : ''}${r.tried.length > 1 ? `\n(fell back after: ${r.tried.slice(0, -1).join(', ')})` : ''}${r.declined ? `\n(the person declined to let ${provider(r.declined)?.label ?? r.declined} read the project, so nothing was sent to it)` : ''}`
   return {
     isOk: r.isOk,
@@ -79,7 +79,7 @@ export async function askTool(
  */
 async function preview(
   $: EngineInterface,
-  a: { providerId: string; model?: string; effort?: string; why: string; prompt: string; mode: 'read' | 'write'; cwd?: string; task?: Task },
+  a: { providerId: string; model?: string; effort?: string; why: string; prompt: string; mode: 'read' | 'write'; cwd?: string; task?: Task; level?: Level },
 ): Promise<string> {
   const p = provider(a.providerId)
   const c = (await read($, config))[a.providerId]
@@ -106,6 +106,7 @@ async function preview(
     `Model: ${model ?? 'the CLI’s default'}${effort ? ` · effort ${effort}` : ''}`,
     ...(a.why ? [`Why: ${a.why}`] : []),
     ...(a.task ? [`Task: ${a.task}`] : []),
+    ...(a.level ? [`Level: ${a.level}`] : []),
     `Access: ${where}`,
     `Fallback: ${fallback}`,
     `Stops after: ${Math.round(timeoutFor('ask', a.mode) / 60_000)} minutes`,
@@ -113,7 +114,7 @@ async function preview(
   ].join('\n')
 }
 
-export async function compareTool($: EngineInterface, prompt: string, providers?: string[], task?: Task): Promise<ToolAnswer> {
+export async function compareTool($: EngineInterface, prompt: string, providers?: string[], task?: Task, level?: Level): Promise<ToolAnswer> {
   const named = Boolean(providers?.length)
   const ids = named ? [...new Set(providers)] : await candidates($)
   const isSmart = (await read($, settings)).smartRouting !== false
@@ -125,7 +126,7 @@ export async function compareTool($: EngineInterface, prompt: string, providers?
       continue
     }
     // each provider answers with its best model for the task
-    const pick = await smartPick($, task ?? 'general', { only: id })
+    const pick = await smartPick($, task ?? 'general', { only: id, level })
     if ('route' in pick) targets.push({ providerId: id, model: pick.route.model, effort: pick.route.effort })
     else if (named) targets.push({ providerId: id })
   }

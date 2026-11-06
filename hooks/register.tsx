@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ProviderConfig, Task } from '../types'
+import type { Level, ProviderConfig, Task } from '../types'
 import { askTool, compareTool, delegateTool } from './actions'
 import { protectLegacyKey } from './auth'
 import { checkAllAuth, connect } from './health'
@@ -14,6 +14,8 @@ import { isModelListStale, refreshModels } from './models'
 import { forgetOtherSessions, sessionKey } from './permissions'
 import { PROVIDERS, TASKS, provider } from './registry'
 import { STORE, loadPersisted, saveConfig } from './state'
+import { LEVELS, LEVEL_USE, isLevel } from './levels'
+import { GUIDE_ID, guideText } from './guide'
 import { currentRules, recordSpawn, ruleFor } from './subagents'
 import { BG, renderPane } from './ui'
 
@@ -77,6 +79,7 @@ async function registerTools($: EngineInterface): Promise<void> {
       'Use it when the user asks to consult, get a second opinion from, or hand a question to one of these providers. ' +
       `Connected: ${names || 'none yet: ask the user to connect one in Jervis AI Hub'}. ` +
       'Give a task and leave provider out to let the hub pick the best connected model and effort for it (the user’s routing rules first); name a provider with a task and no model to get that provider’s best model for it. ' +
+      'Say how hard the work is with level (light, standard or heavy): the hub then picks a model and effort that serve that level, so simple work does not spend a strong model. ' +
       'mode "read" (default) runs in an empty folder and sends only the prompt; pass cwd only when the provider must read project files (the user is asked). ' +
       'mode "write" lets that agent change files in cwd, only when the user asked for it (the user is asked). ' +
       'The other AI does not see this conversation: put all context in the prompt.',
@@ -85,6 +88,7 @@ async function registerTools($: EngineInterface): Promise<void> {
       properties: {
         provider: providerProp,
         task: { type: 'string', enum: tasks, description: 'Used for routing when provider is left out' },
+        level: LEVEL_PROP,
         prompt: { type: 'string', description: 'The full, self-contained prompt' },
         mode: { type: 'string', enum: ['read', 'write'], description: 'read (default) or write' },
         model: { type: 'string', description: 'Optional model override; defaults to the one picked in the hub' },
@@ -114,6 +118,7 @@ async function registerTools($: EngineInterface): Promise<void> {
         prompt: { type: 'string', description: 'The full, self-contained prompt' },
         providers: { type: 'array', items: providerProp, description: 'Which providers (2 to 5); default: the ready ones' },
         task: { type: 'string', enum: tasks, description: 'Optional: each provider then answers with its best model and effort for this task' },
+        level: LEVEL_PROP,
       },
       required: ['prompt'],
     },
@@ -137,11 +142,17 @@ async function registerTools($: EngineInterface): Promise<void> {
   })
 }
 
-/** `/ask-ai` arguments: an optional provider (id or name), an optional task, then the question. */
+const LEVEL_PROP = {
+  type: 'string',
+  enum: [...LEVELS],
+  description: `How hard the work is: ${LEVELS.map(l => `${l} = ${LEVEL_USE[l]}`).join('; ')}`,
+}
+
+/** `/ask-ai` arguments: an optional provider (id or name), task and level, then the question. */
 export async function parseAskArgs(
   $: EngineInterface,
   args: string,
-): Promise<{ provider?: string; task?: Task; prompt: string; connected: string[]; preview: boolean }> {
+): Promise<{ provider?: string; task?: Task; level?: Level; prompt: string; connected: string[]; preview: boolean }> {
   const cfg = await read($, config)
   const live = PROVIDERS.filter(p => cfg[p.id]?.isConnected && cfg[p.id]?.isEnabled)
   const all = args.trim().split(/\s+/).filter(Boolean)
@@ -149,16 +160,18 @@ export async function parseAskArgs(
   const words = all.filter(w => w !== '--preview')
   let providerId: string | undefined
   let task: Task | undefined
-  for (let i = 0; i < 2 && words.length; i++) {
+  let level: Level | undefined
+  for (let i = 0; i < 3 && words.length; i++) {
     const w = words[0]!.toLowerCase()
     const p = !providerId ? live.find(x => x.id === w || x.label.toLowerCase().split(/\s+/)[0] === w) : undefined
     const t = !task ? TASKS.find(x => x.id === w) : undefined
     if (p) providerId = p.id
     else if (t) task = t.id
+    else if (!level && isLevel(w)) level = w
     else break
     words.shift()
   }
-  return { provider: providerId, task, prompt: words.join(' '), connected: live.map(p => p.id), preview }
+  return { provider: providerId, task, level, prompt: words.join(' '), connected: live.map(p => p.id), preview }
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : undefined)
@@ -199,6 +212,18 @@ export const register: Register = on => {
     return r
   })
 
+  // the routing guide, last in the system prompt; a thread keeps the one it started with
+  on('prompt.compose', async ($, e, next) => {
+    const r = await next(e)
+    let text: string | undefined
+    try {
+      text = await guideText($)
+    } catch {
+      text = undefined
+    }
+    return text ? { sections: [...r.sections.filter(x => x.id !== GUIDE_ID), { id: GUIDE_ID, text, scope: 'session' as const }] } : r
+  })
+
   // Claude's own subagents: a rule picks the model when Claude names none.
   // Nothing here may throw after next(e), or the spawn would be asked twice.
   on('agent.spawn', async ($, e, next) => {
@@ -234,12 +259,12 @@ export const register: Register = on => {
     if (!parsed.prompt) {
       return {
         text:
-          'Usage: /ask-ai [provider] [task] [--preview] your question\n' +
+          'Usage: /ask-ai [provider] [task] [light|standard|heavy] [--preview] your question\n' +
           `Providers: ${parsed.connected.join(', ') || 'none connected yet (open /ai-providers)'}\n` +
           `Tasks: ${TASKS.map(t => t.id).join(', ')}. With neither, the hub picks the best connected model.`,
       }
     }
-    const r = await askTool($, { provider: parsed.provider, task: parsed.task, prompt: parsed.prompt, mode: 'read', preview: parsed.preview })
+    const r = await askTool($, { provider: parsed.provider, task: parsed.task, level: parsed.level, prompt: parsed.prompt, mode: 'read', preview: parsed.preview })
     if (parsed.preview) return { text: r.text }
     return { text: r.text, context: [`The person asked another AI through /ask-ai. Its answer:\n${r.text}`] }
   })
@@ -252,6 +277,7 @@ export const register: Register = on => {
     const r = await askTool($, {
       provider: str(a.provider),
       task,
+      level: isLevel(a.level) ? a.level : undefined,
       prompt,
       mode: a.mode === 'write' ? 'write' : 'read',
       model: str(a.model),
@@ -269,7 +295,7 @@ export const register: Register = on => {
     if (!prompt) return { deny: 'compare_ai needs a prompt.' }
     const ids = Array.isArray(a.providers) ? a.providers.filter((x): x is string => typeof x === 'string') : undefined
     const task = TASKS.some(t => t.id === a.task) ? (a.task as Task) : undefined
-    const r = await compareTool($, prompt, ids, task)
+    const r = await compareTool($, prompt, ids, task, isLevel(a.level) ? a.level : undefined)
     return r.isOk ? { result: r.text } : { deny: r.text }
   })
 
