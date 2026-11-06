@@ -2,6 +2,7 @@
 // level, where it runs and how long it has run; ended ones until cleared.
 import type { EngineInterface, RenderInput } from 'claude-code'
 
+import { snipWords } from './activity'
 import { LEVEL_LABEL } from './levels'
 import { allJobs, bandClock, clearEnded, duration, stopJob } from './jobs'
 import { provider } from './registry'
@@ -30,7 +31,7 @@ export async function renderBand($: EngineInterface, e: RenderInput<'AbovePrompt
           <Box key={`job-${j.id}`} flexDirection="row" gap={1}>
             <Text color={COLOR[j.state]}>{ICON[j.state]}</Text>
             <Text>{`${j.title} · ${LEVEL_LABEL[j.level]} · ${where} · ${time}`}</Text>
-            {j.state !== 'running' && j.summary ? <Text dimColor>{`· ${j.summary.slice(0, 80)}`}</Text> : null}
+            {j.state !== 'running' && j.summary ? <Text dimColor>{`· ${snipWords(j.summary, 90)}`}</Text> : null}
             {j.state === 'running' && j.runner === 'other-ai' && j.activityId ? (
               <Button key={`job-stop-${j.id}`} variant="secondary" label="Stop" onPress={() => void stopJob($, j.id)} />
             ) : null}

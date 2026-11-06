@@ -42,6 +42,15 @@ export const snip = (s: string, n: number): string => {
   return one.length > n ? `${one.slice(0, Math.max(1, n - 1))}…` : one
 }
 
+/** Like snip, but ends at the last whole word that fits. */
+export const snipWords = (s: string, n: number): string => {
+  const one = s.replace(/\s+/g, ' ').trim()
+  if (one.length <= n) return one
+  const cut = one.slice(0, Math.max(1, n - 1))
+  const space = cut.lastIndexOf(' ')
+  return `${(space > n / 2 ? cut.slice(0, space) : cut).replace(/[\s.,:;·-]+$/, '')}…`
+}
+
 async function persist($: EngineInterface): Promise<void> {
   await $.store.set(STORE.activity, await read($, activity))
 }

@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { classifyError, mayFallBack, timeoutFor } from '../hooks/cli'
 import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
+import { snipWords } from '../hooks/activity'
 import { duration, size } from '../hooks/requests'
 import { effortForLevel, levelTag, rate } from '../hooks/levels'
 import type { ModelInfo } from '../types'
@@ -59,6 +60,8 @@ type World = {
   partial?: string
   /** the agent.spawn inputs that reached the engine */
   spawned?: { subagentType: string; model?: string }[]
+  /** Claude Code refuses every subagent with this reason */
+  spawnDeny?: string
   /** rows the mod appended to the conversation */
   appended?: { type: string; text: string }[]
   /** what the Codex CLI answers */
@@ -179,6 +182,7 @@ function engine(on: any, w: World) {
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'core', scope: 'shared' }] }))
   on('agent.spawn', (_: unknown, e: { subagentType: string; model?: string }) => {
     ;(w.spawned ??= []).push({ subagentType: e.subagentType, model: e.model })
+    if (w.spawnDeny) return { deny: w.spawnDeny }
     return { model: e.model === 'haiku' ? 'claude-haiku-5-5' : e.model ?? 'claude-opus-5-5', agentId: `a${w.spawned.length}` }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
@@ -1145,4 +1149,28 @@ test('no more than four jobs run at once, and a job needs a level', async ($, on
   expect(fifth).toContain('4 jobs are running already')
   const bad = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: 'x', prompt: 'p' } as never))
   expect(bad).toContain('needs a title, a prompt and a level')
+})
+
+test('a subagent Claude Code refuses starts no job, and Claude hears why and what would work', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  w.spawnDeny = 'The server-side auto mode classifier gave no verdict'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: 'Docs', prompt: 'p', level: 'light', runner: 'subagent' } as never))
+  expect(r).toContain('Claude Code did not start the subagent, so no job was started')
+  expect(r).toContain('auto mode classifier gave no verdict')
+  expect(r).toMatch(/runner \\"other-ai\\" would run it on (ChatGPT|DeepSeek)/)
+  // nothing ran, so nothing shows above the prompt
+  const band = await $.ui.mount(BAND())
+  expect(await band.find({ type: 'Text', text: /^Jervis AI Hub/ })).toBeUndefined()
+  await band.unmount()
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status' } as never))).toContain('No background jobs')
+})
+
+test('a summary is cut at a whole word', () => {
+  expect(snipWords('the subagent was not started: The server-side auto mode classifier gave no verdict', 60)).toBe(
+    'the subagent was not started: The server-side auto mode…',
+  )
+  expect(snipWords('short', 60)).toBe('short')
 })

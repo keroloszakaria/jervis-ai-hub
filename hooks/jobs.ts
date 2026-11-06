@@ -110,8 +110,13 @@ export async function startJob($: EngineInterface, a: StartArgs): Promise<{ job?
     ...(model ? { model } : {}),
   })
   if (spawned.deny !== undefined) {
-    await endJob($, id, 'failed', `the subagent was not started: ${spawned.deny}`, { quiet: true })
-    return { error: `The subagent was not started: ${spawned.deny}` }
+    // nothing ran: the row goes, and Claude hears why and what would work
+    await update($, jobs, l => l.filter(j => j.id !== id))
+    const other = a.runner === 'subagent' ? await smartPick($, 'general', { level: a.level }) : undefined
+    const instead = other && 'route' in other ? ` runner "other-ai" would run it on ${(other as SmartPick).label} instead.` : ''
+    return {
+      error: `Claude Code did not start the subagent, so no job was started: ${spawned.deny}. This comes from Claude Code itself (in Auto mode its permission check can refuse a subagent a plugin starts).${instead}`,
+    }
   }
   if (!spawned.agentId) {
     // core names every subagent it starts; without a name its end cannot be followed
