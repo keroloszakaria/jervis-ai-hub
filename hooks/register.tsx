@@ -16,6 +16,8 @@ import { PROVIDERS, TASKS, provider } from './registry'
 import { STORE, loadPersisted, saveConfig } from './state'
 import { LEVELS, LEVEL_USE, isLevel } from './levels'
 import { GUIDE_ID, guideText } from './guide'
+import { jobStatus, onAgentTurn, startJob } from './jobs'
+import { renderBand } from './band'
 import { currentRules, recordSpawn, ruleFor } from './subagents'
 import { BG, renderPane } from './ui'
 
@@ -125,6 +127,42 @@ async function registerTools($: EngineInterface): Promise<void> {
   })
 
   await $.tool.register({
+    name: 'start_job',
+    isDeferred: false,
+    description:
+      'Start one piece of a big task in the background and return at once. Split a big task into independent pieces first, then start each at its level. ' +
+      'It runs on another AI the user connected that serves the level, or on a Claude subagent with the model set for that level (runner). ' +
+      'Its progress shows above the prompt, and when it ends its result is added to this conversation; job_status reads it too. ' +
+      'Another AI only reads: it sees the prompt, and the project folder when you pass cwd (the user is asked). Put all context in the prompt.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'A short name for the piece, a few words' },
+        prompt: { type: 'string', description: 'The full, self-contained instructions for this piece' },
+        level: LEVEL_PROP,
+        runner: {
+          type: 'string',
+          enum: ['auto', 'subagent', 'other-ai'],
+          description: 'auto (default): another AI that serves the level if one is ready, else a Claude subagent; subagent: a Claude subagent (it can use tools in this project); other-ai: another AI only',
+        },
+        provider: { ...providerProp, description: 'Optional: run it on this provider' },
+        cwd: { type: 'string', description: 'Optional project folder another AI may read (the user is asked)' },
+      },
+      required: ['title', 'prompt', 'level'],
+    },
+  })
+
+  await $.tool.register({
+    name: 'job_status',
+    isDeferred: false,
+    description: 'The background jobs of this session, one line each; with id, that job’s whole result once it ended.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Optional: one job’s id, for its whole result' } },
+    },
+  })
+
+  await $.tool.register({
     name: 'delegate_ai',
     isDeferred: false,
     description:
@@ -222,6 +260,36 @@ export const register: Register = on => {
       text = undefined
     }
     return text ? { sections: [...r.sections.filter(x => x.id !== GUIDE_ID), { id: GUIDE_ID, text, scope: 'session' as const }] } : r
+  })
+
+  // a job run by a subagent ends with that subagent's turn
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId) void onAgentTurn($, e).catch(() => undefined)
+    return r
+  })
+
+  // background jobs above the prompt
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => (await renderBand($, e)) ?? next(e))
+
+  on('tool.call', { tool: 'mcp__ai-subscriptions__start_job' as 'mcp__ai-subscriptions__ask_ai' }, async ($, e) => {
+    const a = e as unknown as Record<string, unknown>
+    const title = str(a.title)
+    const prompt = str(a.prompt)
+    if (!title || !prompt || !isLevel(a.level)) return { deny: 'start_job needs a title, a prompt and a level (light, standard or heavy).' }
+    const runner = a.runner === 'subagent' || a.runner === 'other-ai' ? a.runner : 'auto'
+    const r = await startJob($, { title, prompt, level: a.level, runner, provider: str(a.provider), cwd: str(a.cwd) })
+    if (!r.job) return { deny: r.error ?? 'The job was not started.' }
+    const j = r.job
+    const where = j.runner === 'subagent' ? `a Claude subagent${j.model ? ` (${j.model})` : ''}` : `${j.provider}${j.model ? ` · ${j.model}` : ''}${j.effort ? ` · ${j.effort}` : ''}`
+    return {
+      result: `Started job ${j.id} "${j.title}" at level ${j.level} on ${where}. It runs in the background; its result will be added to this conversation when it ends, and job_status with this id reads it.`,
+    }
+  })
+
+  on('tool.call', { tool: 'mcp__ai-subscriptions__job_status' as 'mcp__ai-subscriptions__ask_ai' }, async ($, e) => {
+    const a = e as unknown as Record<string, unknown>
+    return { result: await jobStatus($, str(a.id)) }
   })
 
   // Claude's own subagents: a rule picks the model when Claude names none.

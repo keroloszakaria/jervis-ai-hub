@@ -3,12 +3,13 @@
 A Claude Code mod that connects your other AI subscriptions and API keys (ChatGPT through Codex, Antigravity, OpenCode, DeepSeek, OpenRouter, MiniMax and more) and lets Claude ask, compare or delegate to them.
 
 - **Pane:** providers, models with effort, each provider's limits, activity and settings, in a black, white and neon orange design.
-- **Tools for Claude:** `ask_ai`, `compare_ai` and `delegate_ai`. You can also ask directly with `/ask-ai [provider] [task] your question`.
+- **Tools for Claude:** `ask_ai`, `compare_ai`, `delegate_ai`, `start_job` and `job_status`. You can also ask directly with `/ask-ai [provider] [task] your question`.
 - **Smart pick:** with a task and no provider, the hub picks the best connected model and effort, using only what each source reports and each provider's remaining limits. A fallback or a comparison uses each provider's best model too.
 - **Limits:** Codex plan windows, Antigravity `/usage`, your Claude session's windows, and the balance endpoints of DeepSeek, OpenRouter, Moonshot and SiliconFlow. Nothing is estimated. A toast warns at 80% and 95% of a window.
 - **Cost:** for API-key providers, the cost OpenCode recorded for each request, per provider and in total.
 - **Control:** a running request shows how long it has run and how much output it has written (sizes only), with a toast when a long one ends; stop it from the Activity tab; each kind of request has its own deadline; `/ask-ai --preview …` (or `preview: true`) shows the route and access without sending anything; export the activity log (metadata only).
 - **Levels of work:** each model shows whether it serves light, standard or heavy work, from what its source reports (or your own choice). Claude passes a `level` and the hub picks a model and effort that fit, so simple work does not spend a strong model. A short guide in Claude's system prompt tells it the levels and which subagent model serves each.
+- **Background jobs:** for a big task, Claude starts each piece with `start_job` at its level, on another AI or a Claude subagent. A band above the prompt shows each job's level, runner and time, and each result comes back into the conversation when it ends (`job_status` reads it too).
 - **Claude's own subagents:** pick the model each subagent type runs on when Claude names none (Explore on Haiku, Plan on Opus…), and see what each subagent of the session ran on. Off until you turn it on.
 - **Languages:** English or Arabic (Settings → Language).
 - **Security:** API keys are typed into a masked system dialog and kept in the system's secure storage: Windows DPAPI, the macOS Keychain, or the Linux Secret Service. They are never shown, logged, put on a command line or stored in plain text.

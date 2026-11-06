@@ -126,6 +126,8 @@ export type Settings = {
   levels?: Record<string, Level>
   /** a short guide in Claude's system prompt: which connected model serves each level; on when absent */
   levelGuide?: boolean
+  /** a finished background job's result is added to the conversation for Claude to read; on when absent */
+  jobReports?: boolean
   /** the pane's language; English when absent */
   language?: 'en' | 'ar'
   fallback: boolean
@@ -159,6 +161,30 @@ export type Spawn = {
   model: string
   /** who chose it: a hub rule, Claude's own call, or nobody (its definition or the session's model) */
   source: 'rule' | 'caller' | 'inherited'
+}
+
+/** One piece of a big task, running in the background. */
+export type Job = {
+  id: string
+  title: string
+  level: Level
+  runner: 'subagent' | 'other-ai'
+  provider?: string
+  model?: string
+  effort?: string
+  state: 'running' | 'done' | 'failed' | 'stopped'
+  startedAt: number
+  endedAt?: number
+  /** the first lines of its result, or why it failed */
+  summary?: string
+  /** the request's activity id, for another AI */
+  activityId?: string
+  /** the subagent's id, for a subagent */
+  agentId?: string
+  /** tokens the run reported, when it did */
+  tokens?: { input: number; output: number }
+  /** the person cleared it from the band */
+  isCleared?: boolean
 }
 
 /** How far a running request has got, as its CLI's output shows; kept for this session only. */
@@ -234,6 +260,7 @@ export type HubPaneUi = PaneUi
 export type HubLimits = Limits
 export type HubProgress = Progress
 export type HubSpawn = Spawn
+export type HubJob = Job
 
 declare module 'claude-code' {
   interface PluginState {
@@ -249,6 +276,8 @@ declare module 'claude-code' {
       limits: Shaped<Record<string, HubLimits>>
       progress: Shaped<Record<string, HubProgress>>
       spawns: Shaped<HubSpawn[]>
+      jobs: Shaped<HubJob[]>
+      jobsAt: Shaped<number>
     }
   }
 }

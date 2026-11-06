@@ -44,6 +44,8 @@ export type RequestArgs = {
   type: ActivityType
   task?: Task
   fallbackFrom?: string
+  /** told the activity id once the request starts, so a background job can show and stop it */
+  onStart?: (activityId: string) => void
 }
 
 /** Identical requests in flight share one run, so a double press or a retried tool call sends nothing twice. */
@@ -95,15 +97,16 @@ async function runStoppable(
   let isDone = false
   await update($, progress, p => ({ ...p, [activityId]: { startedAt, at: startedAt, bytes: 0 } }))
   void (async () => {
-    while (!isDone) {
-      try {
+    // a session that ends mid-run takes the clock with it: the ticker just stops
+    try {
+      while (!isDone) {
         await $.clock.sleep(TICK_MS, { signal: timer.signal })
-      } catch {
-        return
+        if (isDone) return
+        const at = await $.clock.now()
+        await update($, progress, p => (p[activityId] ? { ...p, [activityId]: { startedAt, at, bytes, lastOutputAt } } : p))
       }
-      if (isDone) return
-      const at = await $.clock.now()
-      await update($, progress, p => (p[activityId] ? { ...p, [activityId]: { startedAt, at, bytes, lastOutputAt } } : p))
+    } catch {
+      // stopped
     }
   })()
   try {
@@ -215,6 +218,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     prompt: a.prompt,
     fallbackFrom: a.fallbackFrom,
   })
+  a.onStart?.(id)
   const started = await $.clock.now()
   let secret: string | undefined
   try {

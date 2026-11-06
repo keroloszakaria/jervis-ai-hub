@@ -1393,6 +1393,13 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           hint="A short guide in Claude’s system prompt: the three levels, your connected AIs and the subagent model for each level. New sessions pick up a change."
           onPress={() => void saveSettings($, s => ({ ...s, levelGuide: s.levelGuide === false }))}
         />
+        <Toggle
+          id="job-reports"
+          on={st.jobReports !== false}
+          label="Add each background job’s result to the conversation"
+          hint="When a job ends, its result (up to 4,000 characters) is added for Claude to read. Off: only the band and job_status show it."
+          onPress={() => void saveSettings($, s => ({ ...s, jobReports: s.jobReports === false }))}
+        />
         {LEVELS.map(l => (
           <Pick
             id={`sublevel-${l}`}

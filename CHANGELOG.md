@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+- **Background jobs:** Claude can split a big task into pieces and start each with `start_job` at its level. A job returns at once and runs in the background: on another AI you connected that serves the level, or on a Claude subagent with the model you set for that level (`runner`: auto, subagent or other-ai). At most four run at once. Another AI only reads: it gets the prompt, and the project folder when Claude passes one and you allow it.
+- **Progress above the prompt:** a band above the prompt shows each job with its level, where it runs and how long it has run, and each ended job's first lines. A job on another AI can be stopped from the band. A subagent cannot be stopped from a mod, so it has no Stop button. Clear ended jobs from the band; their results stay readable.
+- **Results back in the conversation:** when a job ends, a toast and a notice in the transcript say so, and its result (up to 4,000 characters) is added to the conversation for Claude to read. `job_status` lists the jobs and gives any job's whole result. Turn the added results off in Settings → Claude subagents.
+- The routing guide now tells Claude to split big tasks into jobs.
+
 ## 0.8.0
 
 - **Levels of work:** every model now shows the level of work it serves: light (search, lookups, summaries), standard (everyday code) or heavy (hard bugs, architecture, reviews). The level comes only from what the model's source reports: a model with effort levels spans several levels by its effort, a reasoning model serves standard and heavy, a model reported without reasoning serves light and standard, and a model whose source reports neither is marked Unrated. You can set any model's level by hand from its details.

@@ -59,6 +59,10 @@ type World = {
   partial?: string
   /** the agent.spawn inputs that reached the engine */
   spawned?: { subagentType: string; model?: string }[]
+  /** rows the mod appended to the conversation */
+  appended?: { type: string; text: string }[]
+  /** what the Codex CLI answers */
+  answerText?: string
   exists?: (path: string) => boolean
   written?: Record<string, string>
   /** npm shims on PATH instead of the installed CLIs */
@@ -165,6 +169,13 @@ function engine(on: any, w: World) {
         ? { value: undefined }
         : new Promise(() => undefined),
   )
+  on('session.append', (_: unknown, e: { message: { type: string; content: { text?: string }[] } }, next: (x: unknown) => unknown) => {
+    ;(w.appended ??= []).push({ type: e.message.type, text: e.message.content.map(c => c.text ?? '').join('') })
+    return next(e)
+  })
+  // nothing to draw above the prompt when the mod has nothing to show
+  on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }))
+  on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'core', scope: 'shared' }] }))
   on('agent.spawn', (_: unknown, e: { subagentType: string; model?: string }) => {
     ;(w.spawned ??= []).push({ subagentType: e.subagentType, model: e.model })
@@ -205,7 +216,7 @@ function respond(w: World, run: Run) {
     if (a.includes('models --standalone')) return ok('opencode/beam-free\ndeepseek/deepseek-chat\n')
     if (e.argv[1] === 'exec') {
       return w.execOk
-        ? ok('{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}\n{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}')
+        ? ok(`{"type":"item.completed","item":{"type":"agent_message","text":"${w.answerText ?? 'OK'}"}}\n{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}`)
         : ok('', 'boom', 1)
     }
     if (e.argv[1] === 'run') {
@@ -1035,4 +1046,103 @@ test('the Models tab shows each model’s level and filters by it', async ($, on
   expect(await ui.find({ key: 'sel-deepseek::deepseek/deepseek-chat' })).toBeUndefined()
   expect(await ui.find({ key: 'sel-deepseek::deepseek/deepseek-reasoner' })).toBeDefined()
   await ui.unmount()
+})
+
+const BAND = () =>
+  ({
+    plugin: 'ai-subscriptions',
+    component: 'AbovePrompt',
+    props: { bodyColumns: 100, hasSurvey: false },
+    surface: 'desktop',
+  }) as never
+
+
+test('a job on another AI starts at once, shows above the prompt, and reports back when it ends', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  w.hang = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: 'Find the leak', prompt: 'look for the leak', level: 'heavy' } as never))
+  expect(r).toMatch(/Started job job-[a-z0-9-]+ \\"Find the leak\\" at level heavy on (chatgpt|deepseek)/)
+  await settle()
+  expect(w.appended?.some(x => x.type === 'system' && x.text.includes('started "Find the leak" (heavy'))).toBe(true)
+
+  const band = await $.ui.mount(BAND())
+  expect(await band.find({ type: 'Text', text: /^Jervis AI Hub · 1 running$/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^Find the leak · Heavy · / })).toBeDefined()
+  const status = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status' } as never))
+  expect(status).toContain('running')
+
+  // stop it from the band: it ends as stopped and says so in the conversation
+  const id = /job-[a-z0-9]+-[a-z0-9]+/.exec(r)![0]
+  await band.press({ key: `job-stop-${id}` })
+  await settle()
+  expect(await band.find({ type: 'Text', text: /^Jervis AI Hub · 0 running · 1 ended$/ })).toBeDefined()
+  expect(w.toasts.some(t => t.includes('job "Find the leak" was stopped'))).toBe(true)
+  const report = w.appended?.find(x => x.type === 'user')
+  expect(report?.text).toContain('[Jervis AI Hub] Background job "Find the leak"')
+  await band.press({ key: 'jobs-clear' })
+  await settle()
+  expect(await band.find({ type: 'Text', text: /^Jervis AI Hub/ })).toBeUndefined()
+  // cleared from the band, still readable
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status', id } as never))).toContain('stopped')
+  await band.unmount()
+})
+
+test('a finished job’s result is added for Claude, cut at 4000 characters, whole through job_status', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  w.answerText = 'A'.repeat(5000)
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: 'Summarize', prompt: 'p', level: 'light', provider: 'chatgpt' } as never))
+  const id = /job-[a-z0-9]+-[a-z0-9]+/.exec(r)![0]
+  await settle()
+  const report = w.appended?.find(x => x.type === 'user')?.text ?? ''
+  expect(report).toContain('Background job "Summarize" (light, ChatGPT (Codex)')
+  expect(report).toContain('finished after')
+  expect(report).toContain(`job_status with id "${id}" gives the rest`)
+  expect(report.length).toBeLessThan(4400)
+  const full = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status', id } as never))
+  expect(full).toContain('A'.repeat(5000))
+})
+
+test('with reports off, the result is not added to the conversation', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS, 'hub-settings-v1': { ...DEFAULT_SETTINGS, jobReports: false } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: 'Quiet', prompt: 'p', level: 'light', provider: 'chatgpt' } as never)
+  await settle()
+  expect(w.appended?.some(x => x.type === 'user')).toBe(false)
+  expect(w.toasts.some(t => t.includes('job "Quiet" finished'))).toBe(true)
+})
+
+test('a job on a Claude subagent asks for the level’s model', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: 'Map the API', prompt: 'list the routes', level: 'light', runner: 'subagent' } as never)
+  expect(w.spawned?.at(-1)?.model).toBe('haiku')
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: 'Design', prompt: 'p', level: 'heavy', runner: 'subagent' } as never)
+  expect(w.spawned?.at(-1)?.model).toBe('opus')
+  // the test kit gives no subagent id (core does), so the hub says it cannot follow it rather than wait forever
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status' } as never))).not.toContain('running')
+})
+
+test('no more than four jobs run at once, and a job needs a level', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  w.hang = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  for (let i = 0; i < 4; i++) {
+    await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: `j${i}`, prompt: `p${i}`, level: 'heavy' } as never)
+  }
+  const fifth = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: 'j5', prompt: 'p5', level: 'heavy' } as never))
+  expect(fifth).toContain('4 jobs are running already')
+  const bad = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__start_job', title: 'x', prompt: 'p' } as never))
+  expect(bad).toContain('needs a title, a prompt and a level')
 })

@@ -202,6 +202,9 @@ const AR: Record<string, string> = {
   'claude subagents': 'الـ subagents بتاعة Claude',
   'also pick a model for each subagent type': 'كمان اختار موديل لكل نوع subagent',
   'tell claude which model suits which work': 'عرّف Claude أنهي موديل يناسب أنهي شغل',
+  'add each background job’s result to the conversation': 'ضيف نتيجة كل مهمة في الخلفية للمحادثة',
+  'when a job ends, its result (up to 4,000 characters) is added for claude to read. off: only the band and job_status show it.':
+    'لما مهمة تخلص، نتيجتها (لحد 4,000 حرف) بتتضاف علشان Claude يقراها. لو مقفول: بتظهر في الشريط و job_status بس.',
   'a short guide in claude’s system prompt: the three levels, your connected ais and the subagent model for each level. new sessions pick up a change.':
     'دليل قصير في الـ system prompt بتاع Claude: المستويات التلاتة، والـ AIs المتوصلة، وموديل الـ subagent لكل مستوى. التغيير بيظهر في الـ sessions الجديدة.',
   level: 'المستوى',

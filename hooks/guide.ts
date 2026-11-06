@@ -38,6 +38,9 @@ export async function guideText($: EngineInterface): Promise<string | undefined>
       `To hand a piece to another AI the user connected (${live.map(p => p.label).join(', ')}), call ask_ai with that level; the hub picks a model and effort that serve it, within each provider's reported limits.`,
     )
   }
+  lines.push(
+    'For a big task, split it into independent pieces and start each with start_job at its level: they run in the background, the user sees their progress, and each result is added to this conversation when it ends.',
+  )
   if (hasSub) {
     lines.push('When you start a subagent and the user named no model, pass the subagent model for the work’s level as the Agent call’s model.')
   }
