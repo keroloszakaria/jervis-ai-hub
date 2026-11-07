@@ -39,7 +39,7 @@ Open the pane with `/ai-providers`.
 ## Developing
 
 - Type checking extends `.claude-plugin/types/tsconfig.json`, which Claude Code writes the first time it loads the mod (the folder is gitignored). Load the mod once, for example with `claude --plugin-dir <this folder>`, then run `npx -p typescript tsc -p .`.
-- Tests: `claude plugin test .` and `claude plugin validate .`. CI (`.github/workflows/ci.yml`) runs both on every push and pull request. It does not type-check yet, because the types are written by Claude Code when it loads the mod.
+- Tests: `claude plugin test .` and `claude plugin validate .`. CI (`.github/workflows/ci.yml`) runs both on every push and pull request, and type-checks with `tsconfig.ci.json` against a copy of Claude Code's declarations in `vendor/` (see `vendor/README.md`).
 - Don't load a development copy and the installed plugin in the same session: both register the same tools and pane.
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
