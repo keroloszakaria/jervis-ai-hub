@@ -214,10 +214,11 @@ function engine(on: any, w: World) {
     if (w.spawnDeny) return { deny: w.spawnDeny }
     return { model: e.model === 'haiku' ? 'claude-haiku-5-5' : e.model ?? 'claude-opus-5-5', agentId: `a${w.spawned.length}` }
   })
-  // a folder resolves to itself, or to where a link leads
+  // a link resolves to where it leads; the test's other folders are not on this disk,
+  // so, as the engine does for a path that leads nowhere, they have no realPath
   on('fs.stat', (_: unknown, e: { path: string }) => {
     const p = winPath(e.path)
-    return { value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: Boolean(w.links?.[p]), realPath: w.links?.[p] ?? p } }
+    return { value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: Boolean(w.links?.[p]), realPath: w.links?.[p] } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
     const f = w.files?.[winPath(e.path)]
