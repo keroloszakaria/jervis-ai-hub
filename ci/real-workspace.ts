@@ -16,6 +16,8 @@ mkdirSync(home)
 // the plugin store, in memory; and a hook run just before `git apply`, to change the folder at that moment
 const store = new Map<string, unknown>()
 let beforeApply: (() => void) | undefined
+// and one run just before the hub stores the files in a run's own git (not the scan's)
+let beforeStore: (() => void) | undefined
 
 // the few engine calls the copy makes, answered by this process; home is a throwaway folder
 const $ = {
@@ -40,6 +42,10 @@ const $ = {
       if (argv.includes('apply') && beforeApply) {
         beforeApply()
         beforeApply = undefined
+      }
+      if (argv.includes('add') && beforeStore && argv.some(a => a.startsWith('--git-dir=') && !/[\\/]scan$/.test(a))) {
+        beforeStore()
+        beforeStore = undefined
       }
       const r = spawnSync(argv[0]!, argv.slice(1), {
         encoding: 'utf8',
@@ -186,6 +192,63 @@ async function main(): Promise<void> {
     check('a file with a key inside is left out, whatever its name', !existsSync(join(run5.tree, 'config', 'prod.json')) && !existsSync(join(run5.tree, 'config', 'pem.txt')), JSON.stringify(run5.leftOut))
     check('ordinary code that mentions a token is copied', existsSync(join(run5.tree, 'code.ts')))
     check('what .jervisignore names is left out', !existsSync(join(run5.tree, 'notes.private.md')) && run5.leftOut.some(l => l.why === 'ignore-file'))
+    // what was left out never reached the run's git: no object holds it
+    const idOf = (file: string) => git(keyed, ['hash-object', '--', file]).out.trim()
+    const inStore = (id: string) => git(home, [`--git-dir=${run5.git}`, 'cat-file', '-e', id]).code === 0
+    check('control: a copied file is in the run\'s git', inStore(idOf('code.ts')))
+    check(
+      "a file left out leaves no copy of its content in the run's git",
+      !inStore(idOf(join('config', 'prod.json'))) && !inStore(idOf(join('config', 'pem.txt'))) && !inStore(idOf('notes.private.md')),
+    )
+    check('the scan, which read every file, is gone before the run starts', !existsSync(join(run5.root, 'scan')))
+
+    // a file changed between the scan and the copy: nothing is copied
+    beforeStore = () => writeFileSync(join(keyed, 'code.ts'), `export const t = "ghp_${'z9Y8'.repeat(9)}"\n`)
+    const runsNow = () => readdirSync(join(home, '.claude', 'jervis-ai-hub', 'work')).filter(n => n.startsWith('run-')).length
+    const before = runsNow()
+    let threw = ''
+    try {
+      await makeCopy($, { folder: keyed, shown: keyed, provider: 'chatgpt' })
+    } catch (error) {
+      threw = String(error)
+    }
+    beforeStore = undefined
+    check('a file changed between the scan and the copy refuses the copy, and leaves no run behind', threw.includes('changed while they were copied') && runsNow() === before, `${threw} ${before} -> ${runsNow()}`)
+    writeFileSync(join(keyed, 'code.ts'), 'export const env = process.env.TOKEN // sk-short\n')
+
+    // the review: each file's diff, and binary files named as such
+    const shown = join(root, 'shown')
+    mkdirSync(shown)
+    writeFileSync(join(shown, 'a.txt'), 'one\ntwo\nthree\n')
+    const run9 = await makeCopy($, { folder: shown, shown, provider: 'chatgpt' })
+    writeFileSync(join(run9.tree, 'a.txt'), 'one\nTWO\nthree\n')
+    writeFileSync(join(run9.tree, 'b.bin'), Buffer.from([0, 1, 2, 0, 255]))
+    const c9 = await compare($, run9)
+    const fa = c9.files.find(f => f.path === 'a.txt')
+    const fb = c9.files.find(f => f.path === 'b.bin')
+    check("the review has each file's diff", Boolean(fa && fa.text.includes('-two') && fa.text.includes('+TWO') && fa.added === 1 && fa.deleted === 1), JSON.stringify(c9.files))
+    check('a binary file is named as one, with no text', Boolean(fb && fb.isBinary && fb.text === '' && fb.status === 'A'), JSON.stringify(fb))
+
+    // an apply onto a file that, meanwhile, changed elsewhere in it: git keeps both, and the hub says so
+    const merge = join(root, 'merge')
+    mkdirSync(merge)
+    writeFileSync(join(merge, 'm.txt'), `${Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n')}\n`)
+    const run10 = await makeCopy($, { folder: merge, shown: merge, provider: 'chatgpt' })
+    writeFileSync(join(run10.tree, 'm.txt'), readFileSync(join(run10.tree, 'm.txt'), 'utf8').replace('line 2\n', 'line 2 (run)\n'))
+    const c10 = await compare($, run10)
+    beforeApply = () => writeFileSync(join(merge, 'm.txt'), readFileSync(join(merge, 'm.txt'), 'utf8').replace('line 27\n', 'line 27 (person)\n'))
+    const r10 = await applyRun($, run10, c10)
+    const m = readFileSync(join(merge, 'm.txt'), 'utf8')
+    check(
+      'a change made meanwhile in another part of the file is kept with the run\'s, and named',
+      r10.isOk && 'alsoChanged' in r10 && (r10.alsoChanged ?? []).includes('m.txt') && m.includes('line 2 (run)') && m.includes('line 27 (person)'),
+      JSON.stringify(r10),
+    )
+    // and an apply with nothing else changed names nothing
+    const run11 = await makeCopy($, { folder: merge, shown: merge, provider: 'chatgpt' })
+    writeFileSync(join(run11.tree, 'm.txt'), readFileSync(join(run11.tree, 'm.txt'), 'utf8').replace('line 5\n', 'line 5 (run)\n'))
+    const r11 = await applyRun($, run11, await compare($, run11))
+    check('a clean apply names no other changes', r11.isOk && !('alsoChanged' in r11) && !('unchecked' in r11), JSON.stringify(r11))
 
     // links: a link in the folder that leads out is not copied, and a link the run makes is never applied
     const linked = join(root, 'linked')

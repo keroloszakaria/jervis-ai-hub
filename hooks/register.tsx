@@ -21,6 +21,7 @@ import { endSessionJobs, jobStatus, onAgentTurn, startJob } from './jobs'
 import { renderBand } from './band'
 import { currentRules, recordSpawn, ruleFor } from './subagents'
 import { BG, renderPane } from './ui'
+import { REVIEW_PANE, renderReview } from './review'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
 const config = atom({ plugin: 'ai-subscriptions', key: 'config' } as const, {}, { shape: 'cfg-3' })
@@ -413,4 +414,6 @@ export const register: Register = on => {
     const els = $.ui.resolve(e)
     return renderPane($, els, e.props.bodyColumns ?? 40)
   })
+
+  on('ui.render', { component: 'Pane', requestId: REVIEW_PANE }, async ($, e) => renderReview($, $.ui.resolve(e)))
 }

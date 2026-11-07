@@ -99,6 +99,19 @@ type World = {
   copyKeyed?: string[]
   /** paths the hub took out of the copy's index */
   dropped?: string[]
+  /** what each `git add` of the hub stored, by its git dir */
+  stored?: { dir: string; paths: string[] }[]
+  /** files the hub's git sees as binary */
+  copyBinary?: string[]
+  /** files that, after an apply, differ from the run's version */
+  copyMerged?: string[]
+  /** the tree the hub's git last read into an index */
+  readTree?: string
+  /** panes opened and closed */
+  opened?: string[]
+  closed?: string[]
+  /** panes other than the hub's own are not drawn */
+  paneUnplaced?: boolean
   /** the working tree as it was when the copy was made */
   copyBase?: Record<string, [string, string]>
   /** the relay's exit code (0 when absent) */
@@ -153,7 +166,14 @@ const winPath = (p: string): string => p.replace(/^.*\/(?=[A-Za-z]:[\\/])/, '')
 function engine(on: any, w: World) {
   on('command.register', () => ({ value: { command: 'ai-providers' } }))
   on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__ai-subscriptions__${e.name}` } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_: unknown, e: { id: string }) => {
+    ;(w.opened ??= []).push(e.id)
+    return { value: w.paneUnplaced && e.id !== 'ai-subscriptions' ? { isPlaced: false, reason: 'no surface' } : { isPlaced: true } }
+  })
+  on('ui.close', (_: unknown, e: { id: string }) => {
+    ;(w.closed ??= []).push(e.id)
+    return { value: undefined }
+  })
   on('ui.toast', (_: unknown, e: { text?: string; message?: string }) => {
     w.toasts.push(String(e.text ?? e.message ?? JSON.stringify(e)))
     return { value: undefined }
@@ -183,7 +203,9 @@ function engine(on: any, w: World) {
       : { value: e.name === 'TEMP' ? 'C:\\Temp' : 'C:\\Local' },
   )
   on('fs.list', () => ({ value: [{ name: 'abc', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }))
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: w.exists ? w.exists(winPath(e.path)) : true }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({
+    value: w.removed?.some(r => winPath(r) === winPath(e.path)) ? false : w.exists ? w.exists(winPath(e.path)) : true,
+  }))
   on('fs.write', (_: unknown, e: { path: string; content?: string; text?: string; data?: string }) => {
     ;(w.written ??= {})[winPath(e.path)] = String(e.content ?? e.text ?? e.data ?? '')
     return { value: undefined }
@@ -296,10 +318,25 @@ function respond(w: World, run: Run) {
       const sub = e.argv.slice(e.argv.findIndex(x => x.startsWith('--git-dir=')) + 1).filter(x => !x.startsWith('--work-tree=') && x !== '--literal-pathspecs')
       if (w.copyFails && sub[0] === 'init') return ok('', 'fatal: could not create work tree dir: No space left on device\n', 128)
       if (sub[0] === 'write-tree') {
+        // the copy as the run left it: the base stays as it was
+        if (run.env?.GIT_INDEX_FILE?.endsWith('after.index')) return ok(`${'a'.repeat(40)}\n`)
         w.copyBase = { ...(w.work ?? {}) }
         return ok(`${'b'.repeat(40)}\n`)
       }
-      if (sub[0] === 'ls-files' && sub.includes('-s')) return ok((w.copyFiles ?? ['src/a.ts']).map(f => `${w.copyLinks?.includes(f) ? '120000' : '100644'} ${'c'.repeat(40)} 0\t${f}`).join('\0') + '\0')
+      // the scan's store is its own repository; the run's holds only what the scan kept
+      if (sub[0] === 'add') {
+        const dir = e.argv.find(x => x.startsWith('--git-dir='))?.slice(10) ?? ''
+        ;(w.stored ??= []).push({ dir, paths: (run.stdin ?? '').split('\0').filter(Boolean) })
+        return ok('')
+      }
+      if (sub[0] === 'diff' && sub.includes('--numstat')) {
+        return ok(copyChanges(w).map(([, f]) => (w.copyBinary?.includes(f) ? `-\t-\t${f}\0` : `1\t1\t${f}\0`)).join(''))
+      }
+      if (sub[0] === 'diff' && sub.includes('-U3')) {
+        return ok(copyChanges(w).map(([, f]) => (w.copyBinary?.includes(f) ? `diff --git a/${f} b/${f}\nBinary files differ\n` : `diff --git a/${f} b/${f}\n--- a/${f}\n+++ b/${f}\n@@ -1 +1 @@\n-old ${f}\n+new ${f}\n`)).join(''))
+      }
+      if (sub[0] === 'read-tree') w.readTree = sub[1]
+      if (sub[0] === 'ls-files' && sub.includes('-s')) return ok((w.copyFiles ?? ['src/a.ts']).filter(f => !w.dropped?.includes(f)).map(f => `${w.copyLinks?.includes(f) ? '120000' : '100644'} ${'c'.repeat(40)} 0\t${f}`).join('\0') + '\0')
       if (sub[0] === 'ls-files' && sub.includes('-i')) return ok('')
       if (sub[0] === 'ls-files') return ok(`${(w.copyFiles ?? ['src/a.ts']).join('\0')}\0`)
       if (sub[0] === 'update-index') {
@@ -310,7 +347,7 @@ function respond(w: World, run: Run) {
         return ok(copyChanges(w).map(([st, f]) => `:100644 ${w.copyLinks?.includes(f) ? '120000' : '100644'} ${'0'.repeat(40)} ${'1'.repeat(40)} ${st}\0${f}\0`).join(''))
       }
       if (sub[0] === 'grep') return w.copyKeyed?.length ? ok(`${w.copyKeyed.join('\0')}\0`) : ok('', '', 1)
-      if (sub[0] === 'diff' && sub.includes('--name-only')) return ok((w.copyStale ?? []).map(f => `${f}\0`).join(''))
+      if (sub[0] === 'diff' && sub.includes('--name-only')) return ok(((w.readTree === 'a'.repeat(40) ? w.copyMerged : w.copyStale) ?? []).map(f => `${f}\0`).join(''))
       if (sub[0] === 'diff' && sub.some(x => x.startsWith('--stat'))) return ok(` ${copyChanges(w).length} files changed\n`)
       if (sub[0] === 'diff') return ok('diff --git a/x b/x\n')
       if (sub[0] === 'apply') {
@@ -1754,6 +1791,92 @@ test('kept for later, apply_changes asks again and applies on Apply', async ($, 
   // a run id that is not one is refused, and never read as a path
   const bad = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__apply_changes', run: '..\\..\\secrets' } as never))
   expect(bad).toContain('No kept changes with run id')
+})
+
+test('the scan has a store of its own: the run keeps only the files the scan kept', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.copyFiles = ['src/a.ts', 'config/prod.json', 'out']
+  w.copyKeyed = ['config/prod.json']
+  w.copyLinks = ['out']
+  w.workAfter = { 'src/a.ts': [' M', 'a2'] }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Discard']
+  await $.tool.call(WRITE as never)
+  const scan = w.stored?.find(x => x.dir.endsWith('\\scan'))
+  const kept = w.stored?.find(x => x.dir.endsWith('\\git'))
+  expect(scan?.paths).toEqual(['src/a.ts', 'config/prod.json', 'out'])
+  expect(kept?.paths).toEqual(['src/a.ts'])
+  // the scan's store is removed before the run's own is written
+  expect(w.removed?.some(r => r.endsWith('\\scan'))).toBe(true)
+})
+
+test("each file's diff is in a review pane beside the question, closed once it is answered", async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'], 'img.png': ['??', 'png'] }
+  w.copyBinary = ['img.png']
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Keep for later']
+  await $.tool.call(WRITE as never)
+  expect(w.opened).toContain('ai-subscriptions-review')
+  expect(w.asked.at(-1)).toContain("Each file's diff is in the Review changes pane.")
+  expect(w.closed).toContain('ai-subscriptions-review')
+})
+
+test('with no pane drawn, the question carries a few diffs itself', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  w.paneUnplaced = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Discard']
+  await $.tool.call(WRITE as never)
+  const q = w.asked.at(-1) ?? ''
+  expect(q).toContain('--- src/x.ts')
+  expect(q).toContain('+new src/x.ts')
+  expect(q).not.toContain('Review changes pane')
+})
+
+test('an apply names the files that also had other changes merged in', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  w.copyMerged = ['src/x.ts']
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Apply']
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(w.applied).toBe('C:\\proj')
+  expect(r).toContain('also had other changes made in the folder meanwhile')
+  expect(r).toContain('- src/x.ts')
+})
+
+test("a run another session kept applies only to this session's folder", async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  const rec = (id: string, folder: string) => ({ id, folder, base: 'b'.repeat(40), provider: 'chatgpt', createdAt: Number(id.split('-')[1]), leftOut: [] })
+  const other = 'run-5-0123456789abcdef'
+  const inside = 'run-6-0123456789abcdef'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  // written after the session's clean-up, which drops records whose folder is gone
+  w.store['hub-work-runs-v1'] = { [other]: rec(other, 'C:\\elsewhere'), [inside]: rec(inside, 'C:\\proj\\sub') }
+  w.answers = ['Apply']
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__apply_changes', run: other } as never))
+  expect(r).toContain("which is not this session's folder")
+  expect(w.applied).toBeUndefined()
+  // a folder inside this session's is fine: it is read and compared (no changes here, so nothing to apply)
+  const ok2 = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__apply_changes', run: inside } as never))
+  expect(ok2).not.toContain("not this session's folder")
 })
 
 test('a dismissed review keeps the changes; Discard removes the copy and applies nothing', async ($, on) => {

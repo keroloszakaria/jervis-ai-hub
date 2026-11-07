@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.4
+
+Review and integrity:
+
+- **Each file's diff before you answer:** beside the Apply, Keep for later or Discard question, a Review changes pane lists each file the run changed with its added and deleted lines, and opens each one's diff. Binary files are named as such, and a link the run made is marked as never applied. Where no pane is drawn, the question carries the first few diffs itself. The pane closes once you answer.
+- **A file left out of the copy leaves nothing behind:** the files are scanned in a repository of the run's own that is removed before the run starts. Only what the scan keeps is stored for the run, so no git object holds a file with a key inside, or what `.jervisignore` names. A file that changes between the scan and the copy refuses the copy.
+- **After an Apply, each file is read again:** a file that also had another change made in the folder meanwhile (git merged both) is named, so you can check it.
+- **A run kept in another session applies only to this session's folder,** or a folder inside it.
+- **Checked with real git:** no object of a left-out file in the run's git (with a control), the scan removed, a file changed between scan and copy, each file's diff and a binary file, and a change made meanwhile elsewhere in a file kept and named.
+- Not changed: Antigravity writes are still held by no folder (off by default). The real CLI checks on macOS and Linux have not run.
+
 ## 0.10.3
 
 Workspace integrity:

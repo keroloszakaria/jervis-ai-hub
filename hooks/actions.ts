@@ -8,9 +8,10 @@ import { finish } from './activity'
 import { errText, timeoutFor } from './cli'
 import { delegate } from './delegation'
 import { filesLine, guardEnv, LOCK_NOTE, refChanges, refusal, snapshot, workState } from './gitguard'
-import { allowProjectRead, allowWrite, folder, reviewChanges, unboundedRefusal } from './permissions'
+import { allowProjectRead, allowWrite, canonicalDir, folder, reviewChanges, unboundedRefusal } from './permissions'
 import type { RefSnapshot } from './gitguard'
-import { applyRun, compare as compareCopy, leftOutLine, makeCopy, readRun, removeRun } from './workspace'
+import { applyRun, compare as compareCopy, isThisSessions, leftOutLine, makeCopy, readRun, removeRun } from './workspace'
+import { closeReview, diffExcerpt, showReview } from './review'
 import type { Compared, WorkRun } from './workspace'
 import { osName } from './platform'
 import { provider } from './registry'
@@ -268,10 +269,19 @@ async function decide($: EngineInterface, run: WorkRun, c: Compared): Promise<To
   const label = provider(run.provider)?.label ?? run.provider
   const n = c.changes.length
   const stat = c.stat.split('\n').slice(0, 21).join('\n')
-  const answer = await reviewChanges(
-    $,
-    `${label} changed ${n} file${n === 1 ? '' : 's'} in a copy of ${run.shown}:\n${stat}\nThe whole patch: ${c.patchPath}\nApply these changes to ${run.shown}? Nothing is staged or committed.`,
-  )
+  const title = `${label} changed ${n} file${n === 1 ? '' : 's'} in a copy of ${run.shown}`
+  // each file's diff in a pane beside the question; where none is drawn, a few of them in the question
+  const isShown = await showReview($, run, c, title)
+  const diffs = isShown ? "Each file's diff is in the Review changes pane." : diffExcerpt(c)
+  let answer: Awaited<ReturnType<typeof reviewChanges>>
+  try {
+    answer = await reviewChanges(
+      $,
+      `${title}:\n${stat}\n${diffs ? `${diffs}\n` : ''}The whole patch: ${c.patchPath}\nApply these changes to ${run.shown}? Nothing is staged or committed.`,
+    )
+  } finally {
+    await closeReview($)
+  }
   const later = `apply_changes with run "${run.id}" asks again; kept runs are removed after 7 days.`
   if (answer === 'discard') {
     await removeRun($, run.root)
@@ -283,13 +293,30 @@ async function decide($: EngineInterface, run: WorkRun, c: Compared): Promise<To
     return { isOk: false, text: `Not applied: ${r.why}${r.files?.length ? `:\n${r.files.map(p => `- ${p}`).join('\n')}` : '.'}\nThe changes are kept (run ${run.id}). ${later}` }
   }
   await removeRun($, run.root)
-  return { isOk: true, text: `Applied to ${run.shown}, not staged or committed (review before committing):\n${changeLines(c)}` }
+  const merged = r.alsoChanged?.length
+    ? `\nThese files also had other changes made in the folder meanwhile; git kept both, so check them:\n${r.alsoChanged.map(p => `- ${p}`).join('\n')}`
+    : r.unchecked
+      ? `\nThe hub could not check the files after applying (${r.unchecked}).`
+      : ''
+  return { isOk: true, text: `Applied to ${run.shown}, not staged or committed (review before committing):\n${changeLines(c)}${merged}` }
 }
 
 /** apply_changes: a kept run's changes put to the person again. */
 export async function applyChangesTool($: EngineInterface, id: string): Promise<ToolAnswer> {
   const run = await readRun($, id)
   if (!run) return { isOk: false, text: `No kept changes with run id "${id}" (they may have been applied, discarded, or removed after 7 days).` }
+  // a run another session made applies only to this session's folder (or one inside it)
+  if (!isThisSessions(id)) {
+    const here = await read($, cwd)
+    const f = here ? await folder($, here) : undefined
+    const os = await osName($)
+    const sep = os === 'windows' ? '\\' : '/'
+    const mine = f && f.error === undefined ? canonicalDir(os, f.real) : undefined
+    const its = canonicalDir(os, run.folder)
+    if (!mine || (its !== mine && !its.startsWith(mine.endsWith(sep) ? mine : mine + sep))) {
+      return { isOk: false, text: `Run ${id} was made for ${run.folder}, which is not this session's folder${here ? ` (${here})` : ''}. Open a session in ${run.folder} to apply it. Nothing was applied.` }
+    }
+  }
   let c: Compared
   try {
     c = await compareCopy($, run)

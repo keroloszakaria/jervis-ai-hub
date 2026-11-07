@@ -40,7 +40,7 @@ Open the pane with `/ai-providers`.
 
 - Type checking extends `.claude-plugin/types/tsconfig.json`, which Claude Code writes the first time it loads the mod (the folder is gitignored). Load the mod once, for example with `claude --plugin-dir <this folder>`, then run `npx -p typescript tsc -p .`.
 - Tests: `claude plugin test .` and `claude plugin validate .`. CI (`.github/workflows/ci.yml`) runs both on every push and pull request, and type-checks with `tsconfig.ci.json` against a copy of Claude Code's declarations in `vendor/` (see `vendor/README.md`).
-- The git guard is also checked with real git: `npx -y tsx@4.19.2 ci/real-gitguard.ts`, and the workspace copy with `npx -y tsx@4.19.2 ci/real-workspace.ts`. A `.jervisignore` in a project's root (`.gitignore` patterns) names more files to leave out of the copy. CI runs both on Linux, Windows and macOS.
+- The git guard is also checked with real git: `npx -y tsx@4.19.2 ci/real-gitguard.ts`, and the workspace copy with `npx -y tsx@4.19.2 ci/real-workspace.ts`. A `.jervisignore` in a project's root (`.gitignore` patterns) names more files to leave out of the copy. Before an Apply, the **Review changes** pane shows each changed file's diff. CI runs both on Linux, Windows and macOS.
 - The CLIs' isolation rules are checked with the real, signed-in CLIs by hand (it sends real prompts): `npx -y tsx@4.19.2 ci/real-cli.ts --opencode-model opencode/beam-free`. Name `opencode`, `agy` or `codex` to check some of them. It exits 0 only when every check passed (1 failed, 3 incomplete) and writes an evidence file under `~/.claude/jervis-ai-hub/evidence`.
 - Don't load a development copy and the installed plugin in the same session: both register the same tools and pane.
 

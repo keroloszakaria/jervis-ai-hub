@@ -6,6 +6,22 @@
 export type Lang = 'en' | 'ar'
 
 const AR: Record<string, string> = {
+  // the review of a run's changes
+  'review changes': 'مراجعة التغييرات',
+  'answer in the question: apply, keep for later or discard. nothing here changes your folder.': 'جاوب في السؤال: Apply أو Keep for later أو Discard. مفيش حاجة هنا بتغيّر المجلد بتاعك.',
+  'open all': 'افتح الكل',
+  'close all': 'اقفل الكل',
+  show: 'اعرض',
+  new: 'جديد',
+  changed: 'متعدّل',
+  deleted: 'متمسوح',
+  'type changed': 'نوعه اتغيّر',
+  'link, never applied': 'رابط، مش هيتطبّق',
+  'binary file: no text diff': 'ملف binary: مفيش diff نصي',
+  'diff too large to show here: see the patch': 'الـ diff أكبر من إنه يتعرض هنا: شوف الـ patch',
+  'no text change (mode or empty file)': 'مفيش تغيير في النص (الصلاحيات أو ملف فاضي)',
+  "the rest of this file's diff is in the patch.": 'باقي الـ diff بتاع الملف ده في الـ patch.',
+  'no changes waiting for review.': 'مفيش تغييرات مستنية مراجعة.',
   // tabs and headings
   overview: 'نظرة عامة',
   models: 'الموديلات',

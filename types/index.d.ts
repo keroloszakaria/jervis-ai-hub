@@ -254,6 +254,26 @@ export type Limits = {
   error?: string
 }
 
+/** One file of a run's changes, as the review pane shows it. */
+export type ReviewFile = {
+  path: string
+  status: 'A' | 'M' | 'D' | 'T'
+  isLink?: boolean
+  isBinary: boolean
+  added: number
+  deleted: number
+  text: string
+  isCut: boolean
+}
+
+/** The run waiting for the person's answer, and which files' diffs are open. */
+export type Review = {
+  runId: string
+  title: string
+  files: ReviewFile[]
+  open: string[]
+}
+
 // Inside the augmentation below, a bare name resolves to claude-code's own
 // export first (claude-code exports a `Settings`), so the values go by these
 // unique aliases.
@@ -267,6 +287,7 @@ export type HubLimits = Limits
 export type HubProgress = Progress
 export type HubSpawn = Spawn
 export type HubJob = Job
+export type HubReview = Review
 
 declare module 'claude-code' {
   interface PluginState {
@@ -284,6 +305,7 @@ declare module 'claude-code' {
       spawns: Shaped<HubSpawn[]>
       jobs: Shaped<HubJob[]>
       jobsAt: Shaped<number>
+      review: Shaped<HubReview>
     }
   }
 }
