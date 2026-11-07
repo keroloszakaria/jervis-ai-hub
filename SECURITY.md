@@ -68,7 +68,7 @@ Report it privately to the maintainer, Kerolos Zakaria, on GitHub. Do not open a
 - The activity log keeps metadata: time, provider, model, task, outcome, duration, tokens and cost. It keeps a prompt preview only if you turn on "Keep redacted prompt previews" (off by default), and then only redacted and short.
 - Exports never include prompts, answers or error text.
 - Usage is what each provider reports: the hub never estimates quota or cost. Subscription use is shown apart from API billing.
-- A request that fails is never retried on its own. It goes to another provider only if you turn fallback on (off by default). A stopped or timed-out request never falls back. Identical read-only requests from one session share a run, so nothing is sent twice.
+- A request that fails is never retried on its own. It goes to another provider only if you turn fallback on (off by default), and only after a limit, a network problem or a provider that could not take it. A sign-in problem, a refusal by the hub (such as Codex without read isolation), an error the hub cannot name, a stop or a timeout ends the request there, and the answer says so. The kind comes first from the HTTP status or error name in the CLI's JSON, then from its words. Identical read-only requests from one session share a run, so nothing is sent twice.
 
 ## Checked versions
 

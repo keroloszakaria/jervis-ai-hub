@@ -5,7 +5,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Level, Task } from '../types'
 import { finish } from './activity'
-import { errText, timeoutFor } from './cli'
+import { ERROR_LABEL, errText, timeoutFor } from './cli'
 import { delegate } from './delegation'
 import { filesLine, guardEnv, LOCK_NOTE, refChanges, refusal, snapshot, workState } from './gitguard'
 import { allowProjectRead, allowWrite, canonicalDir, folder, reviewChanges, unboundedRefusal } from './permissions'
@@ -75,7 +75,7 @@ export async function askTool(
     return { isOk: false, text: 'The person declined project access: nothing was sent.' }
   }
   const r = await askWithFallback($, { provider: providerId, model, effort }, a.prompt, a.task, f?.real, a.level)
-  const via = `${why ? `\n(${why})` : ''}${r.tried.length > 1 ? `\n(fell back after: ${r.tried.slice(0, -1).join(', ')})` : ''}${r.declined ? `\n(the person declined to let ${provider(r.declined)?.label ?? r.declined} read the project, so nothing was sent to it)` : ''}`
+  const via = `${why ? `\n(${why})` : ''}${r.tried.length > 1 ? `\n(fell back after: ${r.tried.slice(0, -1).join(', ')})` : ''}${r.declined ? `\n(the person declined to let ${provider(r.declined)?.label ?? r.declined} read the project, so nothing was sent to it)` : ''}${r.stopped ? `\n(no other provider was tried after this failure (${ERROR_LABEL[r.stopped]}): only a limit, a network problem or an unavailable provider falls back)` : ''}`
   return {
     isOk: r.isOk,
     text: `${header(r)}\n${r.text}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}${via}`,

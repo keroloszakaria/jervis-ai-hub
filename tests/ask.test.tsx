@@ -5,7 +5,7 @@ import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
 import { redactKeys, snipWords } from '../hooks/activity'
 import { changedFiles, parentOf, parseRefs, parseStatus, refChanges, undoHint } from '../hooks/gitguard'
-import { AGY_READ_SETTINGS, parseVersion, versionNote } from '../hooks/cli'
+import { AGY_READ_SETTINGS, parse, parseVersion, versionNote } from '../hooks/cli'
 import { duration, size } from '../hooks/requests'
 import { effortForLevel, levelTag, rate } from '../hooks/levels'
 import type { ModelInfo } from '../types'
@@ -40,6 +40,8 @@ type World = {
   answer: string
   asked: string[]
   leakKeyInStderr: boolean
+  /** what a failing Codex run prints on stdout (its JSON events) */
+  execOut?: string
   balanceAuth?: string
   toasts: string[]
   /** OpenCode prints a session id and records a cost on it */
@@ -444,7 +446,7 @@ function respond(w: World, run: Run) {
     if (e.argv[1] === 'exec') {
       return w.execOk
         ? ok(`{"type":"item.completed","item":{"type":"agent_message","text":"${w.answerText ?? 'OK'}"}}\n{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}`)
-        : ok('', 'boom', 1)
+        : ok(w.execOut ?? '', 'boom', 1)
     }
     if (e.argv[1] === 'run') {
       if (w.leakKeyInStderr) return ok('', `401 invalid key ${run.env?.DEEPSEEK_API_KEY ?? ''}`, 1)
@@ -840,9 +842,12 @@ test('on macOS keys live in the Keychain, passed on stdin, and the store keeps o
 
 const FALLBACK = () => ({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, fallback: true, maxFallbacks: 1 } })
 
+const AT_LIMIT = '{"type":"turn.failed","error":{"message":"You have hit your usage limit."}}'
+
 test('a fallback provider gets the project only with its own yes; a no sends it nothing', async ($, on) => {
   const w = world(FALLBACK())
   w.execOk = false
+  w.execOut = AT_LIMIT
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
@@ -1008,16 +1013,33 @@ test('Stop ends a running request, which reads as stopped and is not retried', a
   await ui.unmount()
 })
 
-test('failures are named by kind, and only a stop or a timeout ends the fallback', async ($, on) => {
+test('failures are named by kind, and only a limit, a network problem or an unavailable provider falls back', async ($, on) => {
   expect(classifyError('429 Too Many Requests')).toBe('limit')
   expect(classifyError('You have hit your usage limit')).toBe('limit')
   expect(classifyError('401 invalid key')).toBe('auth')
   expect(classifyError('getaddrinfo ENOTFOUND api.example.com')).toBe('network')
+  expect(classifyError('spawn opencode ENOENT')).toBe('unavailable')
   expect(classifyError('boom')).toBe('unknown')
-  expect(mayFallBack('limit')).toBe(true)
-  expect(mayFallBack('unknown')).toBe(true)
-  expect(mayFallBack('timeout')).toBe(false)
-  expect(mayFallBack('cancelled')).toBe(false)
+  // a status or an error name in the CLI's JSON decides before the words
+  expect(classifyError({ message: 'Too many tokens in the request', status: 429 })).toBe('limit')
+  expect(classifyError({ message: 'request failed', status: 401 })).toBe('auth')
+  expect(classifyError({ message: 'request failed', status: 503 })).toBe('network')
+  expect(classifyError({ message: 'bad request: rate limit field', status: 400 })).toBe('limit')
+  expect(classifyError({ message: 'the provider said no', name: 'ProviderAuthError' })).toBe('auth')
+  for (const k of ['limit', 'network', 'unavailable'] as const) expect(mayFallBack(k)).toBe(true)
+  for (const k of ['auth', 'unknown', 'policy', 'timeout', 'cancelled'] as const) expect(mayFallBack(k)).toBe(false)
+  expect(mayFallBack(undefined)).toBe(false)
+
+  // the status and name come out of each CLI's error event
+  const oc = parse('opencode-free', '{"type":"error","error":{"name":"APIError","data":{"message":"Slow down","statusCode":429}}}', '', 1)
+  expect([oc.isOk, oc.status, oc.errorName]).toEqual([false, 429, 'APIError'])
+  const auth = parse('opencode-free', '{"type":"error","error":{"name":"ProviderAuthError","data":{"providerID":"deepseek","message":"no key"}}}', '', 1)
+  expect(classifyError({ message: auth.error ?? '', status: auth.status, name: auth.errorName })).toBe('auth')
+  const cx = parse('codex', '{"type":"turn.failed","error":{"message":"unexpected status","status":502}}', '', 1)
+  expect([cx.status, classifyError({ message: cx.error ?? '', status: cx.status })]).toEqual([502, 'network'])
+  // a reconnect error before a finished turn is no failure, and leaves no status behind
+  const ok = parse('codex', '{"type":"error","message":"reconnecting","status":503}\n{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}\n{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}', '', 0)
+  expect([ok.isOk, ok.status]).toEqual([true, undefined])
 
   const w = world(LEGACY())
   w.leakKeyInStderr = true
@@ -1026,6 +1048,44 @@ test('failures are named by kind, and only a stop or a timeout ends the fallback
   await settle()
   const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', prompt: 'hi' } as never)
   expect(JSON.stringify(r)).toContain('(sign-in problem)')
+})
+
+test('an unknown failure is not fallen back from: the next provider gets nothing, and the answer says why', async ($, on) => {
+  const w = world(FALLBACK())
+  w.execOk = false
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'private words' } as never))
+  expect(w.ran.some(x => x.argv.includes('run'))).toBe(false)
+  expect(r).toContain('no other provider was tried after this failure (error)')
+  expect(r).not.toContain('fell back after')
+})
+
+test('a provider at its limit is fallen back from, and the answer names it', async ($, on) => {
+  const w = world(FALLBACK())
+  w.execOk = false
+  w.execOut = AT_LIMIT
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q' } as never))
+  expect(w.ran.some(x => x.argv.includes('run'))).toBe(true)
+  expect(r).toContain('answer from opencode')
+  expect(r).toContain('fell back after: chatgpt')
+  expect(r).not.toContain('no other provider was tried')
+})
+
+test('a refusal is not fallen back from: Codex refused for isolation sends nothing to any other provider', async ($, on) => {
+  const w = world(FALLBACK())
+  w.codexSandbox = 'no-mxc'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q' } as never))
+  expect(r).toContain('so Codex would not be held to its folder')
+  expect(r).toContain('(refused)')
+  expect(w.ran.some(x => x.argv[1] === 'exec' || x.argv.includes('run'))).toBe(false)
 })
 
 test('a CLI installed by npm is run through the script its shim names, never through a shell', async ($, on) => {

@@ -6,7 +6,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Capability, Level, Route, Routes, Task } from '../types'
 import { hasCapability } from './models'
-import { mayFallBack } from './cli'
+import { type ErrorKind, mayFallBack } from './cli'
 import { allowProjectRead } from './permissions'
 import { PROVIDERS } from './registry'
 import { type RequestResult, readiness, runRequest } from './requests'
@@ -98,13 +98,14 @@ export async function askWithFallback(
   task: Task | undefined,
   projectDir: string | undefined,
   level?: Level,
-): Promise<RequestResult & { tried: string[]; declined?: string }> {
+): Promise<RequestResult & { tried: string[]; declined?: string; stopped?: ErrorKind }> {
   const s = await read($, settings)
   const tried: string[] = []
   let r = await runRequest($, { providerId: first.provider, model: first.model, effort: first.effort, prompt, mode: 'read', cwd: projectDir, type: 'ask', task })
   tried.push(first.provider)
-  // a stop or a timeout ends the request: the person is waiting, and the plan was already used
-  if (r.isOk || !s.fallback || !mayFallBack(r.errorKind)) return { ...r, tried }
+  // only a limit, a network problem or an unavailable provider goes on: any other failure ends the request here
+  const end = (x: RequestResult) => ({ ...x, tried, ...(s.fallback && !x.isOk && x.errorKind !== 'cancelled' && !mayFallBack(x.errorKind) ? { stopped: x.errorKind ?? 'unknown' } : {}) })
+  if (r.isOk || !s.fallback || !mayFallBack(r.errorKind)) return end(r)
   for (const id of await candidates($)) {
     if (tried.length - 1 >= s.maxFallbacks) break
     if (tried.includes(id)) continue
@@ -119,5 +120,5 @@ export async function askWithFallback(
     tried.push(id)
     if (r.isOk || !mayFallBack(r.errorKind)) break
   }
-  return { ...r, tried }
+  return end(r)
 }

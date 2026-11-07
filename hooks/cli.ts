@@ -85,14 +85,26 @@ export function timeoutFor(type: string, mode: Mode): number {
   return 5 * 60_000
 }
 
-export type ErrorKind = 'auth' | 'limit' | 'network' | 'timeout' | 'cancelled' | 'unavailable' | 'unknown'
+export type ErrorKind = 'auth' | 'limit' | 'network' | 'timeout' | 'cancelled' | 'unavailable' | 'policy' | 'unknown'
 
-/** What kind of failure a CLI's message describes; the words are a hint, so anything else is `unknown`. */
-export function classifyError(message: string): ErrorKind {
+/** A failure as a CLI reported it: its words, and the HTTP status or error name its JSON carried, when it carried one. */
+export type Failure = { message: string; status?: number; name?: string }
+
+/**
+ * What kind of failure a CLI reported. A status or an error name in its JSON
+ * decides first; the words are a hint after that, so anything else is `unknown`.
+ */
+export function classifyError(f: string | Failure): ErrorKind {
+  const { message, status, name } = typeof f === 'string' ? { message: f, status: undefined, name: undefined } : f
+  if (status === 429) return 'limit'
+  if (status === 401 || status === 403) return 'auth'
+  if (status === 408 || (status !== undefined && status >= 500 && status <= 599)) return 'network'
+  if (name && /auth/i.test(name)) return 'auth'
   const m = message.toLowerCase()
   if (/rate.?limit|\b429\b|quota|usage limit|too many requests|limit reached|insufficient (balance|credit)/.test(m)) return 'limit'
   if (/\b401\b|\b403\b|unauthori[sz]ed|not logged in|not signed in|log ?in again|invalid (api )?key|authenticat/.test(m)) return 'auth'
   if (/enotfound|econnrefused|econnreset|etimedout|getaddrinfo|socket hang up|fetch failed|network|\b50[234]\b|service unavailable/.test(m)) return 'network'
+  if (/\benoent\b|command not found|is not recognized as/.test(m)) return 'unavailable'
   return 'unknown'
 }
 
@@ -103,11 +115,20 @@ export const ERROR_LABEL: Record<ErrorKind, string> = {
   timeout: 'timed out',
   cancelled: 'stopped',
   unavailable: 'not available',
+  policy: 'refused',
   unknown: 'error',
 }
 
-/** Whether a failed read-only request may go on to another provider: not after a stop or a timeout. */
-export const mayFallBack = (kind: ErrorKind | undefined): boolean => kind !== 'cancelled' && kind !== 'timeout'
+/**
+ * The failures another provider may be tried after: the provider was at its
+ * limit, could not be reached, or could not take the request. A sign-in
+ * problem, a refusal, an unknown error, a stop or a timeout ends the request:
+ * another provider would not fix it, and the prompt must not travel on a guess.
+ */
+const RETRYABLE: ReadonlySet<ErrorKind> = new Set<ErrorKind>(['limit', 'network', 'unavailable'])
+
+/** Whether a failed read-only request may go on to another provider. */
+export const mayFallBack = (kind: ErrorKind | undefined): boolean => kind !== undefined && RETRYABLE.has(kind)
 
 /** Where a kind's CLI lives on this machine, or undefined when it is not installed. */
 export async function exe($: EngineInterface, kind: Kind): Promise<string | undefined> {
@@ -270,7 +291,28 @@ export function parseOpencodeExport(stdout: string): Usage | undefined {
   }
 }
 
-export type Parsed = { isOk: boolean; text: string; usage?: Usage; error?: string; /** OpenCode's session id, to read the cost it recorded */ sessionId?: string }
+export type Parsed = {
+  isOk: boolean
+  text: string
+  usage?: Usage
+  error?: string
+  /** the HTTP status and error name the CLI's error event carried, when it carried them */
+  status?: number
+  errorName?: string
+  /** OpenCode's session id, to read the cost it recorded */
+  sessionId?: string
+}
+
+/** An HTTP status a CLI's error object names, under the keys the CLIs use. */
+function statusIn(o: unknown): number | undefined {
+  if (!o || typeof o !== 'object') return undefined
+  const r = o as Record<string, unknown>
+  for (const k of ['statusCode', 'status_code', 'status', 'httpStatus']) {
+    const v = r[k]
+    if (typeof v === 'number' && Number.isInteger(v) && v >= 100 && v <= 599) return v
+  }
+  return undefined
+}
 
 /** Reads a CLI's JSON output into the answer, the usage it reported and any error. */
 export function parse(kind: Kind, stdout: string, stderr: string, exitCode: number): Parsed {
@@ -287,6 +329,8 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
   let text = ''
   let usage: Usage | undefined
   let error: string | undefined
+  let status: number | undefined
+  let errorName: string | undefined
   let sessionId: string | undefined
 
   if (kind === 'codex') {
@@ -305,12 +349,17 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
         }
       }
       if (d.type === 'error' || d.type === 'turn.failed') {
-        const err = (d.error as Record<string, unknown> | undefined)?.message ?? d.message
+        const e = d.error as Record<string, unknown> | undefined
+        const err = e?.message ?? d.message
         error = typeof err === 'string' ? err : JSON.stringify(d).slice(0, 400)
+        status = statusIn(e) ?? statusIn(d)
       }
     }
     // a transient error event (a reconnect) followed by a completed turn is not a failure
-    if (text && usage && exitCode === 0) error = undefined
+    if (text && usage && exitCode === 0) {
+      error = undefined
+      status = undefined
+    }
   } else if (kind === 'agy') {
     const d = json(lines.join('\n')) ?? json(lines[lines.length - 1] ?? '')
     if (d) {
@@ -335,8 +384,11 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
       if (!sessionId && typeof d.sessionID === 'string') sessionId = d.sessionID
       if (d.type === 'text' && typeof part?.text === 'string') parts.push(part.text)
       if (d.type === 'error') {
-        const err = (d.error as Record<string, unknown> | undefined)?.data ?? d.error ?? d.message
+        const e = d.error as Record<string, unknown> | undefined
+        const err = e?.data ?? d.error ?? d.message
         error = typeof err === 'string' ? err : JSON.stringify(err).slice(0, 400)
+        status = statusIn(e?.data) ?? statusIn(e)
+        if (typeof e?.name === 'string') errorName = e.name
       }
     }
     text = parts.join('').trim()
@@ -345,7 +397,7 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
   if (!text && !error && lines.length && !lines.some(l => json(l))) text = lines.join('\n')
   if (exitCode !== 0 && !error) error = `exit ${exitCode}: ${clean(stderr).split('\n').slice(-6).join(' ')}`
   if (!text && !error) error = 'the CLI returned no answer'
-  return { isOk: !error && text.length > 0, text, usage, error, sessionId }
+  return { isOk: !error && text.length > 0, text, usage, error, ...(error && status ? { status } : {}), ...(error && errorName ? { errorName } : {}), sessionId }
 }
 
 /** The first x.y.z in a CLI's --version output ("opencode v2.1.4", "1.5.3"). */

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.6
+
+Fallback that stops on what another provider cannot fix:
+
+- **Only some failures fall back:** with fallback on, a request goes to another provider only after a limit, a network problem or a provider that could not take it. A sign-in problem, an error the hub cannot name, a refusal, a stop or a timeout ends the request. Before, every failure but a stop or a timeout went on to the next provider.
+- **A refusal is never fallen back from:** when the hub refuses a request before sending it (Codex without read isolation, an OpenCode or Antigravity version whose rules it has not checked), no other provider gets the prompt.
+- **The answer says why it stopped:** "no other provider was tried after this failure", with the kind.
+- **Failures read from the CLI's JSON first:** an HTTP status (429, 401/403, 5xx) or an error name (OpenCode's `ProviderAuthError`) decides the kind before the words do. A CLI that cannot be started reads as not available.
+- **Tests:** a table of kinds, statuses and error events from Codex and OpenCode, and three requests: an unknown failure sends nothing on, a limit falls back, an isolation refusal sends nothing on.
+
 ## 0.10.5
 
 Review and apply, finished:

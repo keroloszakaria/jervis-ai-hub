@@ -219,7 +219,8 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
   const wanted = a.effort ?? (model === c?.model ? c?.effort : undefined)
   const pick = resolveModel((await read($, models))[a.providerId]?.models, model, wanted)
   const effort = pick.effort
-  const fail = (text: string): RequestResult => ({ isOk: false, provider: a.providerId, model, effort, text, ms: 0, errorKind: 'unavailable' })
+  // nothing was sent: either this provider cannot take the request now, or the hub refused it (a refusal is not fallen back from)
+  const fail = (text: string, errorKind: ErrorKind = 'unavailable'): RequestResult => ({ isOk: false, provider: a.providerId, model, effort, text, ms: 0, errorKind })
   if (!p) return fail(`Unknown provider "${a.providerId}".`)
   const blocked = await readiness($, a.providerId)
   if (blocked) return fail(blocked)
@@ -230,7 +231,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
   if (!path) return fail(`${p.label}: its CLI was not found.`)
   // rules the hub cannot confirm for this version are no rules at all: refuse
   const unconfined = await isolationProblem($, p.kind, path, a.mode)
-  if (unconfined) return fail(unconfined)
+  if (unconfined) return fail(unconfined, 'policy')
   // Codex: its sandbox must hold the run to its folder, unless the person chose otherwise
   let codexOs: OsName | undefined
   let unisolated = ''
@@ -241,6 +242,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     else {
       return fail(
         `Refused: ${iso.why}, so Codex would not be held to its folder. Nothing was sent. Codex needs its MXC sandbox on Windows (Windows 11 24H2 or 25H2 with the update that adds it); or turn on "Allow Codex without read isolation" in Jervis AI Hub → Settings → Privacy.`,
+        'policy',
       )
     }
   }
@@ -299,7 +301,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     }
     const ms = (await $.clock.now()) - started
     const secrets = secret ? [secret] : []
-    const errorKind = parsed.isOk ? undefined : classifyError(parsed.error ?? '')
+    const errorKind = parsed.isOk ? undefined : classifyError({ message: parsed.error ?? '', status: parsed.status, name: parsed.errorName })
     // a successful answer is cleaned too: a model may echo the key it was given
     const text = parsed.isOk
       ? `${unisolated ? `(${unisolated})\n\n` : ''}${redactKeys(parsed.text, secrets)}`
