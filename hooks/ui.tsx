@@ -724,7 +724,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
             color={hp?.lastTest ? (hp.lastTest.isOk ? 'success' : 'error') : 'warning'}
           />
           {hp?.lastTest && !hp.lastTest.isOk ? <Text color="error">{snip(hp.lastTest.message, IN * 3)}</Text> : null}
-          <KV label="Delegation" value={p.relaySkill ? `Jervis Relay (${p.relaySkill})` : 'Not available'} />
+          <KV label="Delegation" value={p.kind === 'codex' ? 'Run by the hub, under its write profile' : p.relaySkill ? `Jervis Relay (${p.relaySkill})` : 'Not available'} />
           <KV label="Billing" value={snip(BILLING[p.billing], (IN - LABEL_W) * 3)} />
           {!hp?.lastTest ? (
             <Box marginTop={1}>

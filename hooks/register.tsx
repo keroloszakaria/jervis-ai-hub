@@ -166,7 +166,7 @@ async function registerTools($: EngineInterface): Promise<void> {
     name: 'delegate_ai',
     isDeferred: false,
     description:
-      'Hand a bounded coding task to another agent (ChatGPT/Codex or Antigravity) through Jervis Relay: it edits the working tree of the repository, never commits, and reports the files it touched. ' +
+      'Hand a bounded coding task to another agent (ChatGPT/Codex, run by the hub under its write profile; or Antigravity, through Jervis Relay): it edits the working tree of the repository, never commits, and the hub lists the files that changed. ' +
       'Use only when the user asks to delegate work to that AI. The user confirms first. Review the diff afterwards.',
     inputSchema: {
       type: 'object',

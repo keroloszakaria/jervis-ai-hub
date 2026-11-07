@@ -62,33 +62,7 @@ export async function askTool(
     if (!named) return { isOk: false, text: 'Write mode needs a project folder (cwd).' }
     const unbounded = await unboundedRefusal($, providerId)
     if (unbounded) return { isOk: false, text: `Refused: ${unbounded}` }
-    // resolved once: the folder approved is the folder written
-    const f = await folder($, named)
-    if (f.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
-    const dir = f.real
-    // the same git guard as a delegation: refs locked while it writes, and read before and after
-    const before = await snapshot($, dir)
-    if (before.failed) {
-      return { isOk: false, text: `Refused: ${dir} looks like a git repository, but its refs could not be read (${before.failed}), so the write could not be checked. Nothing was sent.` }
-    }
-    if (!(await allowWrite($, providerId, dir, 'ask_ai write mode', f.shown))) return { isOk: false, text: 'The person declined: no files were changed.' }
-    const env = before.isRepo ? await guardEnv($, await osName($)) : undefined
-    const workBefore = before.isRepo ? await workState($, dir) : undefined
-    const prompt = before.isRepo ? `${a.prompt}\n\nRules from the orchestrator: do not commit or push. ${LOCK_NOTE}` : a.prompt
-    const r = await runRequest($, { providerId, model, effort, prompt, mode: 'write', cwd: dir, type: 'ask', task: a.task, env })
-    if (before.isRepo) {
-      const after = await snapshot($, dir)
-      const changed = refChanges(before, after)
-      if (changed.length) {
-        const why = after.failed ? 'the git refs could not be checked after the write' : 'git refs changed during the write, which it must never do'
-        // the run's own row reads as failed too, so the activity log and its counts agree
-        if (r.activityId) await finish($, r.activityId, { state: 'error', error: `refused: ${changed.join('; ')}` })
-        return { isOk: false, text: [`${header(r)}\nRefused: ${why}.`, ...refusal(before, after, changed)].join('\n') }
-      }
-    }
-    // the files changed, as the hub's own git reads them
-    const files = filesLine(workBefore, before.isRepo ? await workState($, dir) : undefined)
-    return { isOk: r.isOk, text: `${header(r)}\n${r.text}\n\n${files}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}` }
+    return writeRun($, { providerId, model, effort, prompt: a.prompt, named, task: a.task, type: 'ask', how: 'ask_ai write mode' })
   }
 
   const f = a.cwd ? await folder($, a.cwd) : undefined
@@ -169,11 +143,63 @@ export async function compareTool($: EngineInterface, prompt: string, providers?
   return { isOk: results.some(r => r.isOk), text }
 }
 
+/**
+ * A write the hub runs itself (an ask_ai write, a Codex delegation): the folder
+ * resolved once and approved, refs locked by the git guard and read before and
+ * after, and the changed files listed by the hub's own git. Codex runs under
+ * the hub's write profile here, so its reads are held to the folder too.
+ */
+async function writeRun(
+  $: EngineInterface,
+  a: { providerId: string; model?: string; effort?: string; prompt: string; named: string; task?: Task; type: 'ask' | 'delegate'; how: string },
+): Promise<ToolAnswer> {
+  const { providerId, model, effort } = a
+  // resolved once: the folder approved is the folder written
+  const f = await folder($, a.named)
+  if (f.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
+  const dir = f.real
+  // refs locked while it writes, and read before and after
+  const before = await snapshot($, dir)
+  if (before.failed) {
+    return { isOk: false, text: `Refused: ${dir} looks like a git repository, but its refs could not be read (${before.failed}), so the write could not be checked. Nothing was sent.` }
+  }
+  if (!(await allowWrite($, providerId, dir, a.how, f.shown))) {
+    return { isOk: false, text: a.type === 'delegate' ? 'The person declined: nothing was delegated.' : 'The person declined: no files were changed.' }
+  }
+  const env = before.isRepo ? await guardEnv($, await osName($)) : undefined
+  const workBefore = before.isRepo ? await workState($, dir) : undefined
+  const rules =
+    a.type === 'delegate'
+      ? `Rules from the orchestrator: do not commit, do not push, keep changes inside this folder, and report what you changed.${before.isRepo ? ` ${LOCK_NOTE}` : ''}`
+      : before.isRepo
+        ? `Rules from the orchestrator: do not commit or push. ${LOCK_NOTE}`
+        : ''
+  const prompt = rules ? `${a.prompt}\n\n${rules}` : a.prompt
+  const r = await runRequest($, { providerId, model, effort, prompt, mode: 'write', cwd: dir, type: a.type, task: a.task, env })
+  if (before.isRepo) {
+    const after = await snapshot($, dir)
+    const changed = refChanges(before, after)
+    if (changed.length) {
+      const why = after.failed ? 'the git refs could not be checked after the write' : 'git refs changed during the write, which it must never do'
+      // the run's own row reads as failed too, so the activity log and its counts agree
+      if (r.activityId) await finish($, r.activityId, { state: 'error', error: `refused: ${changed.join('; ')}` })
+      return { isOk: false, text: [`${header(r)}\nRefused: ${why}.`, ...refusal(before, after, changed)].join('\n') }
+    }
+  }
+  // the files changed, as the hub's own git reads them
+  const files = filesLine(workBefore, before.isRepo ? await workState($, dir) : undefined)
+  return { isOk: r.isOk, text: `${header(r)}\n${r.text}\n\n${files}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}` }
+}
+
 export async function delegateTool($: EngineInterface, providerId: string, brief: string, repo?: string): Promise<ToolAnswer> {
   const named = repo ?? (await read($, cwd))
   if (!named) return { isOk: false, text: 'Delegation needs a repository folder.' }
   const unbounded = await unboundedRefusal($, providerId)
   if (unbounded) return { isOk: false, text: `Refused: ${unbounded}` }
+  // Codex: the hub runs it itself under its write profile, which the relay cannot pass
+  if (provider(providerId)?.kind === 'codex') {
+    return writeRun($, { providerId, prompt: brief, named, type: 'delegate', how: 'delegation (run by the hub under its write profile)' })
+  }
   const f = await folder($, named)
   if (f.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
   if (!(await allowWrite($, providerId, f.real, 'Jervis Relay delegation', f.shown))) return { isOk: false, text: 'The person declined: nothing was delegated.' }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.1
+
+- **Codex delegations are held to the folder too:** the relay cannot give Codex the hub's permission profile (it always passes `--sandbox`, which wins over a profile). A Codex delegation now runs without the relay: the hub runs Codex itself, as for an `ask_ai` write, under its `hubwrite` profile, with the same probe, refusal, folder question, git guard and changed-file list. Only Antigravity delegates through the relay.
+- Not checked with the real Codex on its own: it is the same command as an `ask_ai` write, which `ci/real-cli.ts` checks.
+
 ## 0.10.0
 
 Codex reads are held to the folder:

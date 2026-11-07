@@ -77,6 +77,8 @@ async function skillScript($: EngineInterface, skill: string): Promise<string | 
 /** Whether a provider can be delegated to here, and if not, why. */
 export async function delegationSupport($: EngineInterface, id: string): Promise<{ isOk: boolean; detail: string }> {
   const p = provider(id)
+  // Codex's delegation is run by the hub itself, under its write profile, not by the relay
+  if (p?.kind === 'codex') return { isOk: true, detail: 'run by the hub under its write profile' }
   if (!p?.relaySkill) {
     return { isOk: false, detail: 'No Jervis Relay adapter works with this CLI version (the opencode-delegate relay needs a newer OpenCode).' }
   }

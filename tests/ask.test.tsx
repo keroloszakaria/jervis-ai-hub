@@ -283,7 +283,7 @@ function respond(w: World, run: Run) {
       files[`${root}\\brief.txt`] = w.relay === 'foreign' ? 'an older brief' : brief
       files[`${root}\\result.json`] = JSON.stringify({
         schema: w.relay === 'old-schema' ? 'jervis-relay.result.v0' : 'jervis-relay.result.v1',
-        agent: 'codex',
+        agent: /skills[\\/](\w+)-delegate/.exec(e.argv[1] ?? '')?.[1] ?? 'codex',
         status: 'completed',
         exitCode: 0,
         finalMessage: 'done',
@@ -1411,6 +1411,15 @@ test('redactKeys strips key shapes and exact secrets, and leaves ordinary text',
 const A = 'a'.repeat(40)
 const B = 'b'.repeat(40)
 const REPO = () => ({ head: A, branch: 'main', refs: { 'refs/heads/main': A, 'refs/remotes/origin/main': A } })
+/** a world where Antigravity, the provider that still delegates through the relay, may write */
+const RELAY_WORLD = () => {
+  const legacy = LEGACY()
+  return world({
+    ...legacy,
+    'config-v2': { ...legacy['config-v2'], antigravity: { isConnected: true, isEnabled: true, model: 'gem-pro-high' } },
+    'hub-settings-v1': { ...DEFAULT_SETTINGS, allowUnboundedWrites: true },
+  })
+}
 const DELEGATE = (w: World) => {
   w.paths = { node: 'C:\\node\\node.exe' }
   w.git = REPO()
@@ -1420,12 +1429,12 @@ const DELEGATE = (w: World) => {
 }
 
 test('a delegation runs with git refs locked and pushes sent nowhere', async ($, on) => {
-  const w = world(LEGACY())
+  const w = RELAY_WORLD()
   DELEGATE(w)
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
-  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix the bug', repo: 'C:\\proj' } as never))
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'fix the bug', repo: 'C:\\proj' } as never))
   expect(r).toContain('relay completed')
   const relay = w.ran.find(x => x.argv.includes('--brief'))!
   expect(relay.env?.GIT_CONFIG_COUNT).toBe('2')
@@ -1444,13 +1453,13 @@ test('a delegation runs with git refs locked and pushes sent nowhere', async ($,
 })
 
 test('a delegation that commits anyway is refused, with what changed and how to undo it', async ($, on) => {
-  const w = world(LEGACY())
+  const w = RELAY_WORLD()
   DELEGATE(w)
   w.gitAfter = { head: B, branch: 'main', refs: { 'refs/heads/main': B, 'refs/remotes/origin/main': A, 'refs/heads/side': B } }
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
-  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix the bug', repo: 'C:\\proj' } as never))
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'fix the bug', repo: 'C:\\proj' } as never))
   expect(r).toContain('deny')
   expect(r).toContain('git refs changed')
   expect(r).toContain('HEAD moved from aaaaaaa to bbbbbbb')
@@ -1462,13 +1471,13 @@ test('a delegation that commits anyway is refused, with what changed and how to 
 })
 
 test('outside a git repository a delegation runs without the guard', async ($, on) => {
-  const w = world(LEGACY())
+  const w = RELAY_WORLD()
   DELEGATE(w)
   w.git = undefined
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
-  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never))
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'b', repo: 'C:\\proj' } as never))
   expect(r).toContain('relay completed')
   expect(w.ran.find(x => x.argv.includes('--brief'))?.env?.GIT_CONFIG_COUNT).toBeUndefined()
 })
@@ -1480,13 +1489,13 @@ for (const [relay, why] of [
   ['old-schema', 'unknown schema'],
 ] as const) {
   test(`a relay that exits 0 without a result of this run is not a success (${relay})`, async ($, on) => {
-    const w = world(LEGACY())
+    const w = RELAY_WORLD()
     DELEGATE(w)
     w.relay = relay
     engine(on, w)
     await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
     await settle()
-    const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix it', repo: 'C:\\proj' } as never))
+    const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'fix it', repo: 'C:\\proj' } as never))
     expect(r).toContain('relay result unknown')
     expect(r).toContain(why)
     expect(r).not.toContain('relay completed')
@@ -1496,7 +1505,7 @@ for (const [relay, why] of [
 }
 
 test('a relay result of this run is read: its status, with the files the hub itself saw change', async ($, on) => {
-  const w = world(LEGACY())
+  const w = RELAY_WORLD()
   DELEGATE(w)
   // already changed before and left alone; already changed and changed again; new; renamed
   w.work = { 'notes.md': [' M', 'mine'], 'src/b.ts': [' M', 'v1'] }
@@ -1504,7 +1513,7 @@ test('a relay result of this run is read: its status, with the files the hub its
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
-  const r = JSON.parse(JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix it', repo: 'C:\\proj' } as never))) as { result: string }
+  const r = JSON.parse(JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'fix it', repo: 'C:\\proj' } as never))) as { result: string }
   expect(r.result).toContain('relay completed')
   expect(r.result).toContain("as read by the hub's own git")
   expect(r.result).toContain('- src/b.ts\n- src/c.ts\n- src/new.ts\n- src/old.ts')
@@ -1517,28 +1526,76 @@ test('a relay result of this run is read: its status, with the files the hub its
 })
 
 test('a relay that says completed but exits with an error is not a success', async ($, on) => {
-  const w = world(LEGACY())
+  const w = RELAY_WORLD()
   DELEGATE(w)
   w.relayCode = 2
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
-  const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix it', repo: 'C:\\proj' } as never)
+  const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'fix it', repo: 'C:\\proj' } as never)
   expect(JSON.stringify(r)).toContain('relay completed but exited with 2')
   const log = w.store['hub-activity-v1'] as { state: string }[]
   expect(log.at(-1)?.state).toBe('error')
 })
 
 test('outside a git repository the hub says it cannot list the changed files', async ($, on) => {
-  const w = world(LEGACY())
+  const w = RELAY_WORLD()
   DELEGATE(w)
   w.git = undefined
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
-  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never))
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'b', repo: 'C:\\proj' } as never))
   expect(r).toContain('The hub cannot list the changed files here')
   expect(r).not.toContain('src/a.ts')
+})
+
+test('a relay delegation in a repository git cannot read is refused before the relay runs', async ($, on) => {
+  const w = RELAY_WORLD()
+  DELEGATE(w)
+  w.gitBroken = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(60)
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'b', repo: 'C:\\proj' } as never))
+  expect(r).toContain('so the delegation could not be checked. Nothing ran.')
+  expect(w.ran.some(x => x.argv.includes('--brief'))).toBe(false)
+})
+
+test('a Codex delegation is run by the hub under its write profile, not by the relay', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix the bug', repo: 'C:\\proj' } as never))
+  expect(r).not.toContain('Refused')
+  expect(r).toContain('- src/x.ts')
+  expect(w.ran.some(x => x.argv.includes('--brief'))).toBe(false)
+  const run = w.ran.filter(x => x.argv[1] === 'exec').pop()!
+  expect(run.argv).toContain('default_permissions="hubwrite"')
+  expect(run.argv).not.toContain('-s')
+  expect(winPath(run.cwd ?? '')).toBe('C:\\proj')
+  expect(run.env?.GIT_CONFIG_KEY_0).toBe('core.hooksPath')
+  expect(run.stdin).toContain('fix the bug')
+  expect(run.stdin).toContain('do not commit, do not push')
+  expect(run.stdin).toContain('Git refs are locked')
+  const log = w.store['hub-activity-v1'] as { type: string; mode: string }[]
+  expect(log.at(-1)?.type).toBe('delegate')
+  expect(log.at(-1)?.mode).toBe('write')
+})
+
+test('a Codex delegation is refused when its sandbox cannot hold it to the folder: nothing is sent', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.codexSandbox = 'no-mxc'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never))
+  expect(r).toContain('so Codex would not be held to its folder')
+  expect(w.ran.some(x => x.argv[1] === 'exec' || x.argv.includes('--brief'))).toBe(false)
 })
 
 test('changed files: a status or content change counts, both paths of a rename, nothing else', () => {
@@ -1609,7 +1666,7 @@ test('a write or delegation in a repository git cannot read is refused before an
   expect(write).toContain('its refs could not be read (fatal: detected dubious ownership')
   expect(write).toContain('Nothing was sent')
   const del = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never))
-  expect(del).toContain('so the delegation could not be checked. Nothing ran.')
+  expect(del).toContain('so the write could not be checked. Nothing was sent.')
   expect(w.ran.some(x => x.argv[1] === 'exec' || x.argv.includes('--brief'))).toBe(false)
 })
 
@@ -1670,12 +1727,12 @@ test('a request runs in the folder that was approved, not in the link', async ($
 })
 
 test('the relay writes its result where the hub tells it', async ($, on) => {
-  const w = world(LEGACY())
+  const w = RELAY_WORLD()
   DELEGATE(w)
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
-  await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never)
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'b', repo: 'C:\\proj' } as never)
   const relay = w.ran.find(x => x.argv.includes('--brief'))!
   expect(winPath(relay.env?.PWD ?? '')).toBe('C:\\proj')
   const out = relay.argv[relay.argv.indexOf('--out-dir') + 1] ?? ''
