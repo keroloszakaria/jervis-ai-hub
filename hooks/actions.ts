@@ -8,7 +8,7 @@ import { finish } from './activity'
 import { errText, timeoutFor } from './cli'
 import { delegate } from './delegation'
 import { guardEnv, LOCK_NOTE, refChanges, refusal, snapshot } from './gitguard'
-import { allowProjectRead, allowWrite } from './permissions'
+import { allowProjectRead, allowWrite, folder } from './permissions'
 import { osName } from './platform'
 import { provider } from './registry'
 import { compare, readiness, runRequest, usageLine } from './requests'
@@ -58,14 +58,17 @@ export async function askTool(
   if (a.preview) return { isOk: true, text: await preview($, { ...a, providerId, model, effort, why }) }
 
   if (a.mode === 'write') {
-    const dir = a.cwd ?? (await read($, cwd))
-    if (!dir) return { isOk: false, text: 'Write mode needs a project folder (cwd).' }
+    const named = a.cwd ?? (await read($, cwd))
+    if (!named) return { isOk: false, text: 'Write mode needs a project folder (cwd).' }
+    // resolved once: the folder approved is the folder written
+    const f = await folder($, named)
+    const dir = f.real
     // the same git guard as a delegation: refs locked while it writes, and read before and after
     const before = await snapshot($, dir)
     if (before.failed) {
       return { isOk: false, text: `Refused: ${dir} looks like a git repository, but its refs could not be read (${before.failed}), so the write could not be checked. Nothing was sent.` }
     }
-    if (!(await allowWrite($, providerId, dir, 'ask_ai write mode'))) return { isOk: false, text: 'The person declined: no files were changed.' }
+    if (!(await allowWrite($, providerId, dir, 'ask_ai write mode', f.shown))) return { isOk: false, text: 'The person declined: no files were changed.' }
     const env = before.isRepo ? await guardEnv($, await osName($)) : undefined
     const prompt = before.isRepo ? `${a.prompt}\n\nRules from the orchestrator: do not commit or push. ${LOCK_NOTE}` : a.prompt
     const r = await runRequest($, { providerId, model, effort, prompt, mode: 'write', cwd: dir, type: 'ask', task: a.task, env })
@@ -82,10 +85,11 @@ export async function askTool(
     return { isOk: r.isOk, text: `${header(r)}\n${r.text}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}` }
   }
 
-  if (a.cwd && !(await allowProjectRead($, providerId, a.cwd))) {
+  const f = a.cwd ? await folder($, a.cwd) : undefined
+  if (f && !(await allowProjectRead($, providerId, f.real, f.shown))) {
     return { isOk: false, text: 'The person declined project access: nothing was sent.' }
   }
-  const r = await askWithFallback($, { provider: providerId, model, effort }, a.prompt, a.task, a.cwd, a.level)
+  const r = await askWithFallback($, { provider: providerId, model, effort }, a.prompt, a.task, f?.real, a.level)
   const via = `${why ? `\n(${why})` : ''}${r.tried.length > 1 ? `\n(fell back after: ${r.tried.slice(0, -1).join(', ')})` : ''}${r.declined ? `\n(the person declined to let ${provider(r.declined)?.label ?? r.declined} read the project, so nothing was sent to it)` : ''}`
   return {
     isOk: r.isOk,
@@ -159,11 +163,12 @@ export async function compareTool($: EngineInterface, prompt: string, providers?
 }
 
 export async function delegateTool($: EngineInterface, providerId: string, brief: string, repo?: string): Promise<ToolAnswer> {
-  const dir = repo ?? (await read($, cwd))
-  if (!dir) return { isOk: false, text: 'Delegation needs a repository folder.' }
-  if (!(await allowWrite($, providerId, dir, 'Jervis Relay delegation'))) return { isOk: false, text: 'The person declined: nothing was delegated.' }
+  const named = repo ?? (await read($, cwd))
+  if (!named) return { isOk: false, text: 'Delegation needs a repository folder.' }
+  const f = await folder($, named)
+  if (!(await allowWrite($, providerId, f.real, 'Jervis Relay delegation', f.shown))) return { isOk: false, text: 'The person declined: nothing was delegated.' }
   try {
-    const r = await delegate($, providerId, brief, dir)
+    const r = await delegate($, providerId, brief, f.real)
     return { isOk: r.isOk, text: r.text }
   } catch (error) {
     return { isOk: false, text: `Delegation failed: ${errText(error)}` }

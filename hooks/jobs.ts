@@ -8,7 +8,7 @@ import type { EngineInterface } from 'claude-code'
 import type { Job, Level, Route } from '../types'
 import { redactKeys } from './activity'
 import { LEVEL_LABEL } from './levels'
-import { allowProjectRead } from './permissions'
+import { allowProjectRead, folder } from './permissions'
 import { provider } from './registry'
 import { type RequestResult, runRequest, stopRequest } from './requests'
 import { type SmartPick, smartPick } from './smart'
@@ -161,7 +161,8 @@ async function startIn($: EngineInterface, a: StartArgs, id: string, full: strin
   const r: Route | undefined = pick && 'route' in pick ? (pick as SmartPick).route : undefined
 
   if (r) {
-    if (a.cwd && !(await allowProjectRead($, r.provider, a.cwd))) {
+    const f = a.cwd ? await folder($, a.cwd) : undefined
+    if (f && !(await allowProjectRead($, r.provider, f.real, f.shown))) {
       return { error: `The person declined to let ${provider(r.provider)?.label ?? r.provider} read the project: the job was not started.` }
     }
     const job: Job = { ...base, runner: 'other-ai', provider: r.provider, model: r.model, effort: r.effort }
@@ -172,7 +173,7 @@ async function startIn($: EngineInterface, a: StartArgs, id: string, full: strin
       effort: r.effort,
       prompt: a.prompt,
       mode: 'read',
-      cwd: a.cwd,
+      cwd: f?.real,
       type: 'ask',
       onStart: activityId => {
         // its session ended before the request got going: stop it at once

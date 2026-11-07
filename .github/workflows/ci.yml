@@ -29,3 +29,19 @@ jobs:
         run: claude plugin validate .
       - name: Run the tests
         run: claude plugin test .
+
+  # the git guard against each system's real git: no CLI sign-in, no secrets
+  real-git:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Git guard with real git
+        run: npx -y tsx@4.19.2 ci/real-gitguard.ts

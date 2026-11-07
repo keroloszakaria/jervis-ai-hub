@@ -4,8 +4,8 @@ import { classifyError, mayFallBack, timeoutFor } from '../hooks/cli'
 import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
 import { redactKeys, snipWords } from '../hooks/activity'
-import { parseRefs, refChanges, undoHint } from '../hooks/gitguard'
-import { AGY_READ_SETTINGS, parseVersion } from '../hooks/cli'
+import { parentOf, parseRefs, refChanges, undoHint } from '../hooks/gitguard'
+import { AGY_READ_SETTINGS, parseVersion, versionNote } from '../hooks/cli'
 import { duration, size } from '../hooks/requests'
 import { effortForLevel, levelTag, rate } from '../hooks/levels'
 import type { ModelInfo } from '../types'
@@ -1479,6 +1479,49 @@ test('a folder git says is not a repository is written without the guard', async
   expect(w.ran.find(x => x.argv[1] === 'exec')?.env?.GIT_CONFIG_COUNT).toBeUndefined()
 })
 
+test('a subfolder of a repository git cannot read is refused too: .git is looked for above it', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.gitBroken = true
+  // only the repository's root has a .git
+  w.exists = path => path === 'C:\\proj\\.git'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ ...WRITE, cwd: 'C:\\proj\\src\\deep' } as never))
+  expect(r).toContain('its refs could not be read')
+  expect(w.ran.some(x => x.argv[1] === 'exec')).toBe(false)
+  // with no .git anywhere above, a failing git means no repository
+  w.exists = () => false
+  const free = JSON.stringify(await $.tool.call({ ...WRITE, cwd: 'C:\\other\\dir' } as never))
+  expect(free).not.toContain('Refused')
+})
+
+test('the folder above a path, on each system', () => {
+  expect(parentOf('windows', 'C:\\proj\\src')).toBe('C:\\proj')
+  expect(parentOf('windows', 'C:\\proj')).toBe('C:\\')
+  expect(parentOf('windows', 'C:\\')).toBeUndefined()
+  expect(parentOf('windows', 'c:/proj/src/')).toBe('c:\\proj')
+  expect(parentOf('windows', '\\\\server\\share\\dir')).toBe('\\\\server\\share')
+  expect(parentOf('windows', '\\\\server\\share')).toBeUndefined()
+  expect(parentOf('linux', '/home/me/proj')).toBe('/home/me')
+  expect(parentOf('linux', '/home')).toBe('/')
+  expect(parentOf('linux', '/')).toBeUndefined()
+})
+
+test('a request runs in the folder that was approved, not in the link', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.git = undefined
+  w.links = { 'C:\\link': 'C:\\real' }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ ...WRITE, cwd: 'C:\\link' } as never)
+  expect(w.asked.at(-1)).toContain('C:\\link (which leads to C:\\real)')
+  expect(winPath(w.ran.find(x => x.argv[1] === 'exec')?.cwd ?? '')).toBe('C:\\real')
+})
+
 test('the relay writes its result where the hub tells it', async ($, on) => {
   const w = world(LEGACY())
   DELEGATE(w)
@@ -1488,7 +1531,8 @@ test('the relay writes its result where the hub tells it', async ($, on) => {
   await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never)
   const relay = w.ran.find(x => x.argv.includes('--brief'))!
   const out = relay.argv[relay.argv.indexOf('--out-dir') + 1] ?? ''
-  expect(winPath(out)).toMatch(/^C:\\Temp\\jervis-ai-hub\\relay\\run-\d+-[0-9a-f]{24}$/)
+  // under ~/.claude, not the temp folder a sandboxed agent may write
+  expect(winPath(out)).toMatch(/^C:\\Local\\\.claude\\jervis-ai-hub\\relay\\run-\d+-[0-9a-f]{24}$/)
 })
 
 test('ref changes are named one by one', () => {
@@ -1580,6 +1624,12 @@ test('CLI versions are read from their own --version formats', () => {
   expect(parseVersion('opencode v2.1.4')).toEqual([2, 1, 4])
   expect(parseVersion('1.5.3')).toEqual([1, 5, 3])
   expect(parseVersion('dev build')).toBeUndefined()
+  // Diagnostics tells a checked version from one only allowed, and from a refused one
+  expect(versionNote('opencode-key', 'opencode v2.1.4')).toBe('checked')
+  expect(versionNote('opencode-key', 'opencode v2.3.0')).toBe('allowed, not checked itself (checked on 2.1.4)')
+  expect(versionNote('opencode-key', 'opencode v1.9.0')).toContain('refused')
+  expect(versionNote('agy', '1.5.3')).toBe('checked')
+  expect(versionNote('codex', 'codex-cli 0.130.0')).toBeUndefined()
 })
 
 // background jobs: one count for jobs started together, results that belong to one session

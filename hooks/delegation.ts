@@ -122,8 +122,9 @@ export async function delegate(
   const token = runToken()
   await $.fs.write(briefPath, `${brief}${guard}\nRun: ${token}\n`)
   // the hub names the relay's artifact folder itself, so it reads the result from
-  // where it expects it, never from a path the run reports
-  const outDir = joinPath(os, await tempDir($), 'jervis-ai-hub', 'relay', `run-${stamp}-${token}`)
+  // where it expects it, never from a path the run reports; it is under ~/.claude,
+  // not the temp folder, which Codex's workspace-write sandbox may write
+  const outDir = joinPath(os, await homeDir($), '.claude', 'jervis-ai-hub', 'relay', `run-${stamp}-${token}`)
   const resultPath = joinPath(os, outDir, 'result.json')
 
   // The relay finds the CLI on PATH; a stale shim there must not shadow the working build.

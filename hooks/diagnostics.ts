@@ -3,7 +3,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { DiagRow, Kind } from '../types'
 import { secureStorageStatus } from './auth'
-import { argvOf, clean, errText, exe, onPath } from './cli'
+import { argvOf, clean, errText, exe, onPath, versionNote } from './cli'
 import { delegationSupport } from './delegation'
 import { setUi } from './state'
 
@@ -26,7 +26,13 @@ export async function runDiagnostics($: EngineInterface): Promise<void> {
   ]
   for (const [kind, name] of clis) {
     const path = await exe($, kind)
-    rows.push(path ? { name, isOk: true, detail: `${await version($, path)} · ${path}` } : { name, isOk: false, detail: 'not installed' })
+    if (!path) {
+      rows.push({ name, isOk: false, detail: 'not installed' })
+      continue
+    }
+    const v = await version($, path)
+    const note = versionNote(kind, v)
+    rows.push({ name, isOk: !note?.startsWith('refused'), detail: `${v}${note ? ` (${note})` : ''} · ${path}` })
   }
   const shim = await $.process.run(['where', 'codex'], { timeoutMs: 10_000 }).catch(() => undefined)
   const shimPath = shim?.stdout.split(/\r?\n/).find(l => /\.cmd$/i.test(l.trim()))

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.9
+
+Security fixes:
+
+- **A subfolder of a repository is guarded:** when git cannot read a folder's refs, the hub now looks for a `.git` in that folder and in every folder above it, as git does. A write or delegation in a subfolder of such a repository is refused, where before it ran without the guard.
+- **The CLI runs where you approved:** a project folder is resolved once, when you are asked about it, and the CLI then runs in that resolved folder. A symlink or junction changed after the question changes nothing.
+- **Relay results outside the temp folder:** a delegation's artifact folder is now under `~/.claude/jervis-ai-hub/relay`, which Codex's `workspace-write` sandbox does not write (it may write the temp folder). Antigravity's delegation can still write anywhere, as `SECURITY.md` says.
+- **The git guard is checked with real git in CI:** `ci/real-gitguard.ts` runs the hub's own guard against real git on Linux, Windows and macOS on every push. It checks that commit (with and without `--no-verify`), branch, tag, stash and push are refused, that status, diff and add work, that a commit made past the guard is found, and that a subfolder is read as its repository.
+- **Diagnostics shows how each CLI version stands:** checked, allowed but not checked itself (with the version that was checked), or refused.
+
 ## 0.9.8
 
 Security fixes:

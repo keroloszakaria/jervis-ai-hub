@@ -371,3 +371,20 @@ export async function isolationProblem($: EngineInterface, kind: Kind, path: str
   const what = mode === 'read' ? 'read-only' : 'write'
   return `${t.label} ${v ? v.join('.') : '(its version could not be read)'} is not a version whose ${what} limits the hub has checked (${t.range}), so nothing was sent. Install ${t.label} ${t.range}.`
 }
+
+/** The exact versions the isolation rules were checked on by hand (SECURITY.md, Checked versions). */
+export const CHECKED: Partial<Record<Kind, string>> = { 'opencode-free': '2.1.4', 'opencode-key': '2.1.4', agy: '1.5.3' }
+
+/**
+ * How a CLI's version stands with the hub, for Diagnostics: checked, allowed
+ * but not checked itself, or refused. Undefined for a CLI the hub has no rules
+ * for (Codex keeps its own sandbox).
+ */
+export function versionNote(kind: Kind, versionText: string): string | undefined {
+  const t = TESTED[kind]
+  if (!t) return undefined
+  const v = parseVersion(versionText)
+  if (!v || !t.isOk(v)) return `refused: the hub's rules were checked on ${t.range} only`
+  const seen = v.join('.')
+  return seen === CHECKED[kind] ? 'checked' : `allowed, not checked itself (checked on ${CHECKED[kind]})`
+}

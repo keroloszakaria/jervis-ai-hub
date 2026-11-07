@@ -49,11 +49,38 @@ async function git($: EngineInterface, repo: string, args: string[]): Promise<st
   }
 }
 
+/** The folder that holds `dir`, or undefined at the top of the file system. */
+export function parentOf(os: OsName, dir: string): string | undefined {
+  const sep = os === 'windows' ? '\\' : '/'
+  const d = os === 'windows' ? dir.replace(/\//g, '\\') : dir
+  if (os === 'windows' ? /^[a-z]:\\?$/i.test(d) || /^\\\\[^\\]+\\[^\\]+\\?$/.test(d) : d === '/') return undefined
+  const trimmed = d.length > 1 ? d.replace(/[\\/]+$/, '') : d
+  const at = trimmed.lastIndexOf(sep)
+  if (at < 0) return undefined
+  if (os !== 'windows' && at === 0) return '/'
+  const up = trimmed.slice(0, at)
+  return os === 'windows' && /^[a-z]:$/i.test(up) ? `${up}\\` : up
+}
+
+/**
+ * Whether `dir` or any folder above it has a `.git` (a folder, or the file a
+ * worktree or submodule keeps), the way git itself looks. A check that cannot
+ * be made counts as yes: an unreadable folder must not let a write run unguarded.
+ */
+export async function gitAbove($: EngineInterface, os: OsName, dir: string): Promise<boolean> {
+  let d: string | undefined = os === 'windows' ? dir.replace(/\//g, '\\') : dir
+  for (let i = 0; d !== undefined && i < 256; i++) {
+    if (await $.fs.exists(joinPath(os, d.replace(/[\\/]+$/, ''), '.git')).catch(() => true)) return true
+    d = parentOf(os, d)
+  }
+  return d !== undefined
+}
+
 /**
  * What the repository's refs are now, read by the hub's own git, without the
  * guard. A folder git calls "not a git repository" is not one. Any other
  * failure (git missing or timing out, an unsafe-ownership refusal, refs that
- * cannot be listed) in a folder that has a .git is `failed`: a write there must
+ * cannot be listed) in a folder with a .git in it or above it is `failed`: a write there must
  * not run unchecked.
  */
 export async function snapshot($: EngineInterface, repo: string): Promise<RefSnapshot> {
@@ -66,8 +93,7 @@ export async function snapshot($: EngineInterface, repo: string): Promise<RefSna
   if (probe?.exitCode === 0 && probe.stdout.trim() !== 'true') return { isRepo: false, refs: {} }
   if (probe && probe.exitCode !== 0 && /not a git repository/i.test(probe.stderr)) return { isRepo: false, refs: {} }
   if (!probe || probe.exitCode !== 0) {
-    const hasGit = await $.fs.exists(joinPath(await osName($), repo, '.git')).catch(() => true)
-    if (!hasGit) return { isRepo: false, refs: {} }
+    if (!(await gitAbove($, await osName($), repo))) return { isRepo: false, refs: {} }
     const why = probe ? (probe.stderr.trim().split(/\r?\n/)[0] ?? '') || `git exited with ${probe.exitCode}` : 'git could not run'
     return { isRepo: true, refs: {}, failed: why }
   }
