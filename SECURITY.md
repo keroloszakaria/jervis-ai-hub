@@ -14,6 +14,7 @@ Report it privately to the maintainer, Kerolos Zakaria, on GitHub. Do not open a
 
 - An API key is typed into a masked system dialog, never into the pane. It is kept in the system's secure storage: Windows DPAPI (bound to your user account), the macOS Keychain or the Linux Secret Service. It is never shown, logged, stored in plain text or put on a command line; a CLI gets it in its environment or on stdin.
 - Subscriptions are signed in through each provider's own CLI. The hub never reads another application's session tokens or browser cookies.
+- A provider is used only once a check (local, no prompt) has found it signed in. A sign-in not checked yet, or a check that could not run, is checked again when a request needs that provider, and the request waits for it. A request the provider refuses for its sign-in or key marks it signed out, so it is not routed to again until you connect it again or a new session checks it.
 - A saved key is not taken as proof that it works. A provider reads as verified only after a real check. "Test right after connecting" sends one real prompt, so it is off by default.
 
 **What leaves your machine**

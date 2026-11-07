@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.7
+
+A sign-in is checked before it is used:
+
+- **Not known is not ready:** a provider whose sign-in has not been checked yet, or whose check could not run, is no longer taken as signed in. The router leaves it out, and a request named for it checks the sign-in first (locally, no prompt) and waits for the answer. A preview says "its sign-in has not been checked yet" and runs nothing.
+- **One check at a time:** a request that needs a check already under way, such as the one at session start, waits for it rather than starting another.
+- **A refused sign-in sticks:** when a provider refuses a request for its sign-in or key, the hub marks it signed out and does not route to it again until you connect it again, or a new session's check finds it signed in.
+- **Tests:** a check that could not run at start is run again with the request (signed out: nothing sent; signed in: the request runs), and a 401 marks the provider signed out, so it is refused by name and left out of routing.
+
 ## 0.10.6
 
 Fallback that stops on what another provider cannot fix:

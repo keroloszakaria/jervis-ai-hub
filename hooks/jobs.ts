@@ -10,7 +10,7 @@ import { redactKeys } from './activity'
 import { LEVEL_LABEL } from './levels'
 import { allowProjectRead, folder } from './permissions'
 import { provider } from './registry'
-import { type RequestResult, runRequest, stopRequest } from './requests'
+import { type RequestResult, checkUnknownSignIns, runRequest, stopRequest } from './requests'
 import { type SmartPick, smartPick } from './smart'
 import { DEFAULT_SETTINGS } from './state'
 import { subagentModels } from './subagents'
@@ -156,6 +156,7 @@ async function startIn($: EngineInterface, a: StartArgs, id: string, full: strin
   const base: Job = { id, title: a.title, level: a.level, runner: 'other-ai', state: 'running', startedAt: at }
 
   // where it runs: the runner asked for; on auto, another AI that serves the level, else a subagent
+  if (a.runner !== 'subagent') await checkUnknownSignIns($, a.provider ? [a.provider] : undefined)
   const pick = a.runner === 'subagent' ? undefined : await smartPick($, 'general', { only: a.provider, level: a.level })
   if (pick && !('route' in pick) && (a.runner === 'other-ai' || a.provider)) return { error: `No AI to run it: ${pick.reason}.` }
   const r: Route | undefined = pick && 'route' in pick ? (pick as SmartPick).route : undefined

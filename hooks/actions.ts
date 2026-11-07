@@ -15,7 +15,7 @@ import { closeReview, diffExcerpt, showReview } from './review'
 import type { Compared, WorkRun } from './workspace'
 import { osName } from './platform'
 import { provider } from './registry'
-import { compare, readiness, runRequest, usageLine } from './requests'
+import { checkUnknownSignIns, compare, readiness, runRequest, usageLine } from './requests'
 import type { RequestResult } from './requests'
 import { askWithFallback, candidates, route } from './routing'
 import { smartPick } from './smart'
@@ -40,6 +40,8 @@ export async function askTool(
   let model = a.model
   let effort = a.effort
   let why = ''
+  // a preview runs nothing; a real request first checks any sign-in not known yet
+  if (!a.preview) await checkUnknownSignIns($)
   if (!providerId) {
     const r = await route($, a.task ?? 'general', undefined, a.level, Boolean(a.task))
     if (!r.route) return { isOk: false, text: `No provider to route to: ${r.reason}. Connect one in Jervis AI Hub.` }
@@ -125,6 +127,7 @@ async function preview(
 
 export async function compareTool($: EngineInterface, prompt: string, providers?: string[], task?: Task, level?: Level): Promise<ToolAnswer> {
   const named = Boolean(providers?.length)
+  await checkUnknownSignIns($, named ? providers : undefined)
   const ids = named ? [...new Set(providers)] : await candidates($)
   const isSmart = (await read($, settings)).smartRouting !== false
   const targets: { providerId: string; model?: string; effort?: string }[] = []

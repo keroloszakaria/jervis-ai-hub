@@ -6,13 +6,13 @@ import type { EngineInterface } from 'claude-code'
 
 import type { ActivityType, Mode, Task, Usage } from '../types'
 import { begin, finish, redact, redactKeys } from './activity'
-import { revealForRequest } from './auth'
+import { checkAuth, revealForRequest } from './auth'
 import { ERROR_LABEL, type ErrorKind, MAX_ARG_PROMPT, argvOf, classifyError, codexIsolation, errText, exe, invocation, isolationProblem, parse, parseOpencodeExport, sandboxDir, timeoutFor } from './cli'
 import { resolveModel } from './models'
 import { osName } from './platform'
 import type { OsName } from './platform'
 import { sessionKey } from './permissions'
-import { provider } from './registry'
+import { PROVIDERS, provider } from './registry'
 import { DEFAULT_SETTINGS, setHealth } from './state'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
@@ -187,7 +187,38 @@ async function announce($: EngineInterface, label: string, ms: number, outcome: 
   )
 }
 
-/** Whether a provider may take a request now: connected, on, installed and signed in. */
+// one sign-in check per provider at a time: a request that needs one waits for the check under way
+const checks = new Map<string, Promise<void>>()
+
+/** Checks one provider's sign-in or key: cheap, local, sends no prompt. */
+export function checkSignIn($: EngineInterface, id: string): Promise<void> {
+  const p = provider(id)
+  if (!p) return Promise.resolve()
+  let job = checks.get(id)
+  if (!job) {
+    job = (async () => {
+      await setHealth($, id, h => ({ ...h, auth: 'checking' }))
+      const r = await checkAuth($, p)
+      const at = await $.clock.now()
+      await setHealth($, id, h => ({ ...h, auth: r.state, authMessage: r.message, authCheckedAt: at }))
+    })().finally(() => checks.delete(id))
+    checks.set(id, job)
+  }
+  return job
+}
+
+/**
+ * Before a request is routed or sent: checks each connected, enabled provider
+ * (or the ones named) whose sign-in is not known yet, so none is used on a guess.
+ */
+export async function checkUnknownSignIns($: EngineInterface, ids?: string[]): Promise<void> {
+  const cfg = await read($, config)
+  const h = await read($, health)
+  const list = (ids ?? PROVIDERS.map(p => p.id)).filter(id => cfg[id]?.isConnected && cfg[id]?.isEnabled)
+  await Promise.all(list.filter(id => checks.has(id) || !h[id] || h[id]!.auth === 'unknown' || h[id]!.auth === 'checking').map(id => checkSignIn($, id)))
+}
+
+/** Whether a provider may take a request now: connected, on, installed, and known to be signed in. */
 export async function readiness($: EngineInterface, id: string): Promise<string | undefined> {
   const p = provider(id)
   if (!p) return `Unknown provider "${id}".`
@@ -197,6 +228,8 @@ export async function readiness($: EngineInterface, id: string): Promise<string 
   const h = (await read($, health))[id]
   if (h?.auth === 'not-installed') return `${p.label}: its CLI is not installed.`
   if (h?.auth === 'signed-out' || h?.auth === 'missing-credential') return `${p.label}: ${h.authMessage ?? 'not signed in.'}`
+  // a sign-in the hub has not checked is not taken as one
+  if (!h || h.auth === 'unknown' || h.auth === 'checking') return `${p.label}: its sign-in has not been checked yet${h?.authMessage && h.auth === 'unknown' ? ` (the last check could not run: ${h.authMessage})` : ''}.`
   return undefined
 }
 
@@ -222,6 +255,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
   // nothing was sent: either this provider cannot take the request now, or the hub refused it (a refusal is not fallen back from)
   const fail = (text: string, errorKind: ErrorKind = 'unavailable'): RequestResult => ({ isOk: false, provider: a.providerId, model, effort, text, ms: 0, errorKind })
   if (!p) return fail(`Unknown provider "${a.providerId}".`)
+  await checkUnknownSignIns($, [a.providerId])
   const blocked = await readiness($, a.providerId)
   if (blocked) return fail(blocked)
   if (p.kind === 'agy' && a.prompt.length > MAX_ARG_PROMPT) {
@@ -319,6 +353,16 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
       secrets,
     )
     await announce($, p.label, ms, parsed.isOk ? 'ok' : 'error')
+    // the provider refused the sign-in or key: it is not used again until a check finds it signed in
+    if (errorKind === 'auth') {
+      const at = await $.clock.now()
+      await setHealth($, a.providerId, h => ({
+        ...h,
+        auth: 'signed-out',
+        authCheckedAt: at,
+        authMessage: `a request was refused for its sign-in or key. Sign in again (or save a new key), then connect it again in Jervis AI Hub.`,
+      }))
+    }
     if (parsed.isOk) {
       const at = await $.clock.now()
       await setHealth($, a.providerId, h => ({ ...h, lastSuccessAt: at, lastLatencyMs: ms }))

@@ -9,7 +9,7 @@ import { checkAuth, forgetCredential, promptAndStoreKey } from './auth'
 import { argvOf, clean, errText, exe } from './cli'
 import { refreshModels } from './models'
 import { provider } from './registry'
-import { runRequest } from './requests'
+import { checkSignIn, runRequest } from './requests'
 import { note, saveConfig, setHealth, DEFAULT_SETTINGS } from './state'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
@@ -64,12 +64,7 @@ export async function checkAllAuth($: EngineInterface): Promise<void> {
 }
 
 export async function checkOne($: EngineInterface, id: string): Promise<void> {
-  const p = provider(id)
-  if (!p) return
-  await setHealth($, id, h => ({ ...h, auth: 'checking' }))
-  const r = await checkAuth($, p)
-  const at = await $.clock.now()
-  await setHealth($, id, h => ({ ...h, auth: r.state, authMessage: r.message, authCheckedAt: at }))
+  await checkSignIn($, id)
 }
 
 /** A real, minimal request: the only thing that marks a provider verified. */

@@ -42,6 +42,8 @@ type World = {
   leakKeyInStderr: boolean
   /** what a failing Codex run prints on stdout (its JSON events) */
   execOut?: string
+  /** Codex's sign-in check: what `codex login status` says, or 'throws' when it cannot run */
+  login?: string
   balanceAuth?: string
   toasts: string[]
   /** OpenCode prints a session id and records a cost on it */
@@ -437,7 +439,10 @@ function respond(w: World, run: Run) {
       if (psScript(e.argv).includes('account/rateLimits/read')) return ok(`${RATE}\n`)
       return ok(CIPHER)
     }
-    if (a.includes('login status')) return ok('Logged in using ChatGPT')
+    if (a.includes('login status')) {
+      if (w.login === 'throws') throw new Error('login status could not run')
+      return ok(w.login ?? 'Logged in using ChatGPT')
+    }
     if (a.includes('debug models')) {
       return ok(JSON.stringify({ models: [{ slug: 'gpt-6-sol', display_name: 'GPT-6-Sol', visibility: 'list', context_window: 500000, input_modalities: ['text', 'image'], supported_reasoning_levels: [{ effort: 'low' }, { effort: 'medium' }, { effort: 'high' }], default_reasoning_level: 'medium' }] }))
     }
@@ -1086,6 +1091,59 @@ test('a refusal is not fallen back from: Codex refused for isolation sends nothi
   expect(r).toContain('so Codex would not be held to its folder')
   expect(r).toContain('(refused)')
   expect(w.ran.some(x => x.argv[1] === 'exec' || x.argv.includes('run'))).toBe(false)
+})
+
+test('a sign-in not known yet is checked before a request; signed out, nothing is sent', async ($, on) => {
+  const w = world(LEGACY())
+  w.login = 'throws'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  // the check at start could not run: Codex is not taken as signed in, not even by a preview
+  const pre = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q', preview: true } as never))
+  expect(pre).toContain('its sign-in has not been checked yet')
+  const checks = () => w.ran.filter(x => x.argv.includes('login')).length
+  const before = checks()
+
+  // the check runs again with the request, and says signed out: nothing is sent
+  w.login = 'Not logged in'
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q' } as never))
+  expect(checks()).toBe(before + 1)
+  expect(r).toContain('Not signed in to Codex')
+  expect(w.ran.some(x => x.argv[1] === 'exec')).toBe(false)
+})
+
+test('a sign-in not known yet that the check confirms lets the request run', async ($, on) => {
+  const w = world(LEGACY())
+  w.login = 'throws'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.login = undefined
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q' } as never))
+  expect(w.ran.some(x => x.argv[1] === 'exec')).toBe(true)
+  expect(r).toContain('OK')
+})
+
+test('a request refused for its sign-in marks the provider signed out, and the router leaves it out', async ($, on) => {
+  const w = world(LEGACY())
+  w.execOk = false
+  w.execOut = '{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized"}}'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const first = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q' } as never))
+  expect(first).toContain('(sign-in problem)')
+  const sent = w.ran.filter(x => x.argv[1] === 'exec').length
+
+  // named again: refused before anything is sent
+  const again = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q2' } as never))
+  expect(again).toContain('a request was refused for its sign-in or key')
+  expect(w.ran.filter(x => x.argv[1] === 'exec').length).toBe(sent)
+  // routed: another provider takes it
+  const routed = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'general', prompt: 'q3' } as never))
+  expect(w.ran.filter(x => x.argv[1] === 'exec').length).toBe(sent)
+  expect(routed).not.toContain('[chatgpt')
 })
 
 test('a CLI installed by npm is run through the script its shim names, never through a shell', async ($, on) => {

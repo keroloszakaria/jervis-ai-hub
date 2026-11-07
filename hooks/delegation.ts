@@ -10,7 +10,7 @@ import { clean, dirOf, errText, exe, onPath } from './cli'
 import { changedFiles, filesLine, guardEnv, LOCK_NOTE, refChanges, refusal, snapshot, workState } from './gitguard'
 import { resolveModel } from './models'
 import { provider } from './registry'
-import { readiness } from './requests'
+import { checkUnknownSignIns, readiness } from './requests'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
 import { homeDir, joinPath, osName, pathSep, tempDir } from './platform'
@@ -101,6 +101,7 @@ export async function delegate(
 ): Promise<DelegationResult> {
   const p = provider(id)
   if (!p?.relaySkill) return { isOk: false, text: 'This provider has no working relay adapter.' }
+  await checkUnknownSignIns($, [id])
   const blocked = await readiness($, id)
   if (blocked) return { isOk: false, text: blocked }
   const script = await skillScript($, p.relaySkill)
