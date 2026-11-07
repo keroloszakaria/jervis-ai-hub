@@ -96,6 +96,8 @@ export async function delegate(
   id: string,
   brief: string,
   repo: string,
+  /** in a workspace copy: the hub compares the copy itself, so the relay's run lists no files */
+  opts: { inCopy?: boolean } = {},
 ): Promise<DelegationResult> {
   const p = provider(id)
   if (!p?.relaySkill) return { isOk: false, text: 'This provider has no working relay adapter.' }
@@ -193,7 +195,7 @@ export async function delegate(
   // the files changed, read by the hub's own git: the relay's own list is never used
   const workAfter = before.isRepo ? await workState($, repo) : undefined
   const touched = workBefore && workAfter ? changedFiles(workBefore, workAfter) : undefined
-  const files = `\n${filesLine(workBefore, workAfter)}`
+  const files = opts.inCopy ? '' : `\n${filesLine(workBefore, workAfter)}`
   if (changed.length) {
     const why = `git refs changed during the delegation: ${changed.join('; ')}`
     await finish($, actId, { state: 'error', ms, touchedFiles: touched, resultPreview: final, error: why })

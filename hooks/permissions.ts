@@ -105,11 +105,25 @@ export async function unboundedRefusal($: EngineInterface, providerId: string): 
   return `${label} writes are not held to the folder: it could change any file you can. They are off; turn on "Allow writes not held to the folder (Antigravity)" in Jervis AI Hub → Settings → Privacy to allow them. Nothing was sent.`
 }
 
-export async function allowWrite($: EngineInterface, providerId: string, dir: string, how: string, shown = dir): Promise<boolean> {
+export async function allowWrite($: EngineInterface, providerId: string, dir: string, how: string, shown = dir, inCopy = false): Promise<boolean> {
   const label = provider(providerId)?.label ?? providerId
-  const where = writeIsBounded(providerId) ? `in ${shown}` : `starting in ${shown}. It is not held to this folder and can change any file you can`
-  const answer = await confirm($, `Let ${label} change files ${where} (${how})? Nothing is committed.`, ['Allow', 'Deny'])
+  const place = inCopy ? `a copy of ${shown}` : shown
+  const where = writeIsBounded(providerId) ? `in ${place}` : `starting in ${place}. It is not held to this folder and can change any file you can`
+  const review = inCopy ? ' You see the changes before any reach the folder.' : ''
+  const answer = await confirm($, `Let ${label} change files ${where} (${how})?${review} Nothing is committed.`, ['Allow', 'Deny'])
   return answer === 'Allow'
+}
+
+export type Review = 'apply' | 'keep' | 'discard'
+
+/**
+ * After a run in a copy: whether its changes go into the folder. Only the
+ * person's own answer in this dialog applies them; a dismissed dialog keeps
+ * them for later, so nothing is lost and nothing is applied.
+ */
+export async function reviewChanges($: EngineInterface, question: string): Promise<Review> {
+  const answer = await confirm($, question, ['Apply', 'Keep for later', 'Discard'])
+  return answer === 'Apply' ? 'apply' : answer === 'Discard' ? 'discard' : 'keep'
 }
 
 /** Drops every read grant of sessions other than this one (called as a session starts). */

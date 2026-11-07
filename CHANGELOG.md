@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.2
+
+Writes go to a workspace copy:
+
+- **A write runs in a copy, and you decide what reaches the folder:** an `ask_ai` write or a `delegate_ai` runs in a copy of the folder under `~/.claude/jervis-ai-hub/work`. The copy has no `.git`, no ignored files, and none of the usual secret files (`.env`, keys, `.npmrc`). The hub then names the changed files and the patch and asks: Apply, Keep for later, or Discard. Nothing is staged or committed.
+- **An Apply never overwrites your edits:** if any file the run changed was changed in the folder after the copy, nothing is applied and those files are named.
+- **`apply_changes`** asks again about a run kept for later. Kept runs are removed after 7 days.
+- **Your own `.git` is only read:** the copy, the compare and the apply use a git repository of the hub's own for each run.
+- The changed-file list is the run's own, no longer "by anyone".
+- **"Write straight into the folder"** (Privacy, off by default) gives back the old behaviour.
+- **Checked:** `ci/real-workspace.ts` runs copy, compare and apply with real git (binary files, line endings, a deleted file, refusals) and runs in CI on all three systems. `ci/real-cli.ts codex` adds three copy checks with the real Codex: `.env` is not in the copy, a write lands in the copy and not the folder, and Apply writes it. All 8 Codex checks pass on Windows 11.
+
 ## 0.10.1
 
 - **Codex delegations are held to the folder too:** the relay cannot give Codex the hub's permission profile (it always passes `--sandbox`, which wins over a profile). A Codex delegation now runs without the relay: the hub runs Codex itself, as for an `ask_ai` write, under its `hubwrite` profile, with the same probe, refusal, folder question, git guard and changed-file list. Only Antigravity delegates through the relay.

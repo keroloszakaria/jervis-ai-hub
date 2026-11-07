@@ -8,7 +8,10 @@ import { finish } from './activity'
 import { errText, timeoutFor } from './cli'
 import { delegate } from './delegation'
 import { filesLine, guardEnv, LOCK_NOTE, refChanges, refusal, snapshot, workState } from './gitguard'
-import { allowProjectRead, allowWrite, folder, unboundedRefusal } from './permissions'
+import { allowProjectRead, allowWrite, folder, reviewChanges, unboundedRefusal } from './permissions'
+import type { RefSnapshot } from './gitguard'
+import { applyRun, compare as compareCopy, makeCopy, readRun, removeRun } from './workspace'
+import type { Compared, WorkRun } from './workspace'
 import { osName } from './platform'
 import { provider } from './registry'
 import { compare, readiness, runRequest, usageLine } from './requests'
@@ -163,10 +166,18 @@ async function writeRun(
   if (before.failed) {
     return { isOk: false, text: `Refused: ${dir} looks like a git repository, but its refs could not be read (${before.failed}), so the write could not be checked. Nothing was sent.` }
   }
-  if (!(await allowWrite($, providerId, dir, a.how, f.shown))) {
+  const direct = (await read($, settings)).writeDirect === true
+  if (!(await allowWrite($, providerId, dir, a.how, f.shown, !direct))) {
     return { isOk: false, text: a.type === 'delegate' ? 'The person declined: nothing was delegated.' : 'The person declined: no files were changed.' }
   }
   const env = before.isRepo ? await guardEnv($, await osName($)) : undefined
+  if (!direct) {
+    const rules = a.type === 'delegate' ? ' Rules from the orchestrator: do not commit, do not push, keep changes inside this folder, and report what you changed.' : ''
+    return inCopy($, { providerId, dir, shown: f.shown, before }, async (tree, note) => {
+      const r = await runRequest($, { providerId, model, effort, prompt: `${a.prompt}\n\n${note}${rules}`, mode: 'write', cwd: tree, type: a.type, task: a.task, env })
+      return { isOk: r.isOk, text: `${header(r)}\n${r.text}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}`, activityId: r.activityId }
+    })
+  }
   const workBefore = before.isRepo ? await workState($, dir) : undefined
   const rules =
     a.type === 'delegate'
@@ -191,6 +202,109 @@ async function writeRun(
   return { isOk: r.isOk, text: `${header(r)}\n${r.text}\n\n${files}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}` }
 }
 
+const COPY_NOTE =
+  'You are working in a copy of the project folder. The person sees your changes and decides whether they are applied; nothing you do reaches the real folder before that. There is no .git here.'
+
+/**
+ * Runs `work` in a copy of `dir`, then puts the copy's changes to the person:
+ * Apply (only onto files still as they were when copied), Keep for later, or
+ * Discard. The person's own folder is written only by an Apply.
+ */
+async function inCopy(
+  $: EngineInterface,
+  a: { providerId: string; dir: string; shown: string; before: RefSnapshot },
+  work: (tree: string, note: string) => Promise<{ isOk: boolean; text: string; activityId?: string }>,
+): Promise<ToolAnswer> {
+  let run: WorkRun
+  try {
+    run = await makeCopy($, { folder: a.dir, shown: a.shown, provider: a.providerId })
+  } catch (error) {
+    return {
+      isOk: false,
+      text: `Refused: the hub could not make a copy of ${a.shown} to work in (${errText(error)}). Nothing was sent. To write into the folder itself, turn on "Write straight into the folder" in Jervis AI Hub → Settings → Privacy.`,
+    }
+  }
+  const left = run.leftOut.length
+    ? `\nLeft out of the copy, by their names: ${run.leftOut.slice(0, 10).join(', ')}${run.leftOut.length > 10 ? ` and ${run.leftOut.length - 10} more` : ''}.`
+    : ''
+  let done: { isOk: boolean; text: string; activityId?: string }
+  try {
+    done = await work(run.tree, COPY_NOTE)
+  } catch (error) {
+    await removeRun($, run.root)
+    throw error
+  }
+  // the folder's own refs, in case anything reached them
+  if (a.before.isRepo) {
+    const after = await snapshot($, a.dir)
+    const changed = refChanges(a.before, after)
+    if (changed.length) {
+      await removeRun($, run.root)
+      const why = after.failed ? 'the git refs could not be checked after the run' : 'git refs changed during the run, which it must never do'
+      if (done.activityId) await finish($, done.activityId, { state: 'error', error: `refused: ${changed.join('; ')}` })
+      return { isOk: false, text: [`${done.text}\nRefused: ${why}. The copy's changes were discarded.`, ...refusal(a.before, after, changed)].join('\n') }
+    }
+  }
+  let c: Compared
+  try {
+    c = await compareCopy($, run)
+  } catch (error) {
+    await removeRun($, run.root)
+    return { isOk: false, text: `${done.text}\n\nThe hub could not read the copy's changes (${errText(error)}), so nothing was applied.${left}` }
+  }
+  if (!c.changes.length) {
+    await removeRun($, run.root)
+    return { isOk: done.isOk, text: `${done.text}\n\nNo files changed in the copy, so nothing was applied.${left}` }
+  }
+  const outcome = await decide($, run, c)
+  return { isOk: done.isOk && outcome.isOk, text: `${done.text}\n\n${outcome.text}${left}` }
+}
+
+function changeLines(c: Compared, max = 50): string {
+  const lines = c.changes.slice(0, max).map(x => `- ${x.path}${x.status === 'A' ? ' (new)' : x.status === 'D' ? ' (deleted)' : ''}`)
+  return `${lines.join('\n')}${c.changes.length > max ? `\n- and ${c.changes.length - max} more` : ''}`
+}
+
+/** Asks the person about a run's changes and does what they say. */
+async function decide($: EngineInterface, run: WorkRun, c: Compared): Promise<ToolAnswer> {
+  const label = provider(run.provider)?.label ?? run.provider
+  const n = c.changes.length
+  const stat = c.stat.split('\n').slice(0, 21).join('\n')
+  const answer = await reviewChanges(
+    $,
+    `${label} changed ${n} file${n === 1 ? '' : 's'} in a copy of ${run.shown}:\n${stat}\nThe whole patch: ${c.patchPath}\nApply these changes to ${run.shown}? Nothing is staged or committed.`,
+  )
+  const later = `apply_changes with run "${run.id}" asks again; kept runs are removed after 7 days.`
+  if (answer === 'discard') {
+    await removeRun($, run.root)
+    return { isOk: true, text: `The person discarded the changes: nothing was applied.\n${changeLines(c)}` }
+  }
+  if (answer === 'keep') return { isOk: true, text: `Kept for later, not applied (run ${run.id}). ${later}\n${changeLines(c)}` }
+  const r = await applyRun($, run, c)
+  if (!r.isOk) {
+    return { isOk: false, text: `Not applied: ${r.why}${r.files?.length ? `:\n${r.files.map(p => `- ${p}`).join('\n')}` : '.'}\nThe changes are kept (run ${run.id}). ${later}` }
+  }
+  await removeRun($, run.root)
+  return { isOk: true, text: `Applied to ${run.shown}, not staged or committed (review before committing):\n${changeLines(c)}` }
+}
+
+/** apply_changes: a kept run's changes put to the person again. */
+export async function applyChangesTool($: EngineInterface, id: string): Promise<ToolAnswer> {
+  const run = await readRun($, id)
+  if (!run) return { isOk: false, text: `No kept changes with run id "${id}" (they may have been applied, discarded, or removed after 7 days).` }
+  let c: Compared
+  try {
+    c = await compareCopy($, run)
+  } catch (error) {
+    return { isOk: false, text: `The hub could not read the kept changes (${errText(error)}).` }
+  }
+  if (!c.changes.length) {
+    await removeRun($, run.root)
+    return { isOk: true, text: 'That run changed no files; nothing to apply.' }
+  }
+  return decide($, run, c)
+}
+
 export async function delegateTool($: EngineInterface, providerId: string, brief: string, repo?: string): Promise<ToolAnswer> {
   const named = repo ?? (await read($, cwd))
   if (!named) return { isOk: false, text: 'Delegation needs a repository folder.' }
@@ -202,8 +316,19 @@ export async function delegateTool($: EngineInterface, providerId: string, brief
   }
   const f = await folder($, named)
   if (f.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
-  if (!(await allowWrite($, providerId, f.real, 'Jervis Relay delegation', f.shown))) return { isOk: false, text: 'The person declined: nothing was delegated.' }
+  const direct = (await read($, settings)).writeDirect === true
+  if (!(await allowWrite($, providerId, f.real, 'Jervis Relay delegation', f.shown, !direct))) return { isOk: false, text: 'The person declined: nothing was delegated.' }
   try {
+    if (!direct) {
+      const before = await snapshot($, f.real)
+      if (before.failed) {
+        return { isOk: false, text: `Refused: ${f.real} looks like a git repository, but its refs could not be read (${before.failed}), so the delegation could not be checked. Nothing ran.` }
+      }
+      return await inCopy($, { providerId, dir: f.real, shown: f.shown, before }, async (tree, note) => {
+        const r = await delegate($, providerId, `${brief}\n\n${note}`, tree, { inCopy: true })
+        return { isOk: r.isOk, text: r.text }
+      })
+    }
     const r = await delegate($, providerId, brief, f.real)
     return { isOk: r.isOk, text: r.text }
   } catch (error) {

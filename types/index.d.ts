@@ -137,6 +137,8 @@ export type Settings = {
   allowUnboundedWrites?: boolean
   /** Codex runs when its sandbox cannot hold it to the folder (no MXC on Windows); off when absent */
   allowCodexUnisolated?: boolean
+  /** writes edit the folder itself instead of a copy reviewed before it is applied; off when absent */
+  writeDirect?: boolean
   recordPreviews: boolean
   verifyOnConnect: boolean
   retentionCount: number

@@ -6,7 +6,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Level, ProviderConfig, Task } from '../types'
-import { askTool, compareTool, delegateTool } from './actions'
+import { applyChangesTool, askTool, compareTool, delegateTool } from './actions'
+import { cleanOldRuns } from './workspace'
 import { protectLegacyKey } from './auth'
 import { checkAllAuth, connect } from './health'
 import { refreshAllLimits, refreshClaudeLimits } from './limits'
@@ -166,8 +167,8 @@ async function registerTools($: EngineInterface): Promise<void> {
     name: 'delegate_ai',
     isDeferred: false,
     description:
-      'Hand a bounded coding task to another agent (ChatGPT/Codex, run by the hub under its write profile; or Antigravity, through Jervis Relay): it edits the working tree of the repository, never commits, and the hub lists the files that changed. ' +
-      'Use only when the user asks to delegate work to that AI. The user confirms first. Review the diff afterwards.',
+      'Hand a bounded coding task to another agent (ChatGPT/Codex, run by the hub under its write profile; or Antigravity, through Jervis Relay). It works in a copy of the repository (no .git, no secret files); the user then sees the changed files and chooses Apply, Keep for later or Discard. Nothing is committed. ' +
+      'Use only when the user asks to delegate work to that AI. The user confirms first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -176,6 +177,18 @@ async function registerTools($: EngineInterface): Promise<void> {
         repo: { type: 'string', description: 'The repository folder; defaults to the session folder' },
       },
       required: ['provider', 'brief'],
+    },
+  })
+
+  await $.tool.register({
+    name: 'apply_changes',
+    isDeferred: false,
+    description:
+      'Put the changes of a run that the user kept for later (an ask_ai write or delegate_ai that ran in a copy) to the user again: Apply, Keep for later or Discard. Only the user\'s own answer applies them. Use when the user asks to apply kept changes.',
+    inputSchema: {
+      type: 'object',
+      properties: { run: { type: 'string', description: 'The run id the earlier answer gave (run-…)' } },
+      required: ['run'],
     },
   })
 }
@@ -219,6 +232,8 @@ export const register: Register = on => {
     const ran = await next(e)
     // project-read grants never outlive the session that gave them
     forgetOtherSessions(await sessionKey($))
+    // copies kept for later are removed after a week
+    void $.clock.now().then(now => cleanOldRuns($, now)).catch(() => undefined)
     await update($, cwd, () => e.cwd)
     await loadPersisted($)
     await migrate($)
@@ -384,6 +399,13 @@ export const register: Register = on => {
     const brief = str(a.brief)
     if (!id || !brief) return { deny: 'delegate_ai needs a provider and a brief.' }
     const r = await delegateTool($, id, brief, str(a.repo))
+    return r.isOk ? { result: r.text } : { deny: r.text }
+  })
+
+  on('tool.call', { tool: 'mcp__ai-subscriptions__apply_changes' as 'mcp__ai-subscriptions__ask_ai' }, async ($, e) => {
+    const id = str((e as unknown as Record<string, unknown>).run)
+    if (!id) return { deny: 'apply_changes needs the run id.' }
+    const r = await applyChangesTool($, id)
     return r.isOk ? { result: r.text } : { deny: r.text }
   })
 

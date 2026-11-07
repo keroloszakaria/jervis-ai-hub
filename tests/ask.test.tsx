@@ -83,6 +83,18 @@ type World = {
   workAfter?: Record<string, [string, string]>
   /** what `codex sandbox` does with the hub's profiles: holds them (default), cannot run them (no MXC), or lets a read out */
   codexSandbox?: 'ok' | 'no-mxc' | 'leaks'
+  /** the workspace copy: the files git lists in the folder (default one file), and what the hub's own git sees */
+  copyFiles?: string[]
+  /** files the folder changed after the copy was made (an apply is then refused) */
+  copyStale?: string[]
+  /** the hub's own git cannot copy (a full disk, say) */
+  copyFails?: boolean
+  /** set by the hub's `git apply` into the folder */
+  applied?: string
+  /** run folders the hub removed */
+  removed?: string[]
+  /** the working tree as it was when the copy was made */
+  copyBase?: Record<string, [string, string]>
   /** the relay's exit code (0 when absent) */
   relayCode?: number
   /** what the relay leaves: a result for this run (default), none, one for another brief, or an unknown schema */
@@ -230,10 +242,32 @@ function engine(on: any, w: World) {
     return { value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: Boolean(w.links?.[p]), realPath: w.links?.[p] ?? p } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
-    const f = w.files?.[winPath(e.path)]
+    const f = w.files?.[winPath(e.path)] ?? (winPath(e.path).includes('\\work\\run-') ? w.written?.[winPath(e.path)] : undefined)
     if (f === undefined) throw new Error('ENOENT')
     return { value: f }
   })
+}
+
+/** What the hub's own git sees changed in the copy: the files whose status or content the run changed. */
+function copyChanges(w: World): [string, string][] {
+  if (!w.workAfter || !w.copyBase) return []
+  const split = (o: Record<string, [string, string]>) => {
+    const m: Record<string, string> = {}
+    for (const [k, [xy, c]] of Object.entries(o)) {
+      const [to, from] = k.split('<-')
+      m[to!] = `${xy}:${c}`
+      if (from) m[from] = 'gone'
+    }
+    return m
+  }
+  const a = split(w.copyBase)
+  const b = split(w.work ?? {})
+  const out: [string, string][] = []
+  for (const f of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
+    if (a[f] === b[f]) continue
+    out.push([b[f] === 'gone' || b[f] === undefined ? 'D' : b[f]!.startsWith('??') || b[f]!.startsWith('R') ? 'A' : 'M', f])
+  }
+  return out
 }
 
 function respond(w: World, run: Run) {
@@ -250,6 +284,31 @@ function respond(w: World, run: Run) {
       if (w.codexSandbox === 'no-mxc') return ok('', 'windows sandbox failed: MXC is not available on this device\n', 1)
       if (/[\\/]outside[\\/]/.test(file) && w.codexSandbox !== 'leaks') return ok('', 'Get-Content : Access is denied\n', 1)
       return ok(w.written?.[winPath(file)] ?? '')
+    }
+    // the hub's own git for a workspace copy: it names its own --git-dir
+    if (e.argv[0] === 'git' && e.argv.some(x => x.startsWith('--git-dir='))) {
+      const sub = e.argv.slice(e.argv.findIndex(x => x.startsWith('--git-dir=')) + 1).filter(x => !x.startsWith('--work-tree=') && x !== '--literal-pathspecs')
+      if (w.copyFails && sub[0] === 'init') return ok('', 'fatal: could not create work tree dir: No space left on device\n', 128)
+      if (sub[0] === 'write-tree') {
+        w.copyBase = { ...(w.work ?? {}) }
+        return ok('base0tree\n')
+      }
+      if (sub[0] === 'ls-files') return ok(sub.includes('-s') ? '' : `${(w.copyFiles ?? ['src/a.ts']).join('\0')}\0`)
+      if (sub[0] === 'diff' && sub.includes('--name-status')) return ok(copyChanges(w).map(([st, f]) => `${st}\0${f}\0`).join(''))
+      if (sub[0] === 'diff' && sub.includes('--name-only')) return ok((w.copyStale ?? []).map(f => `${f}\0`).join(''))
+      if (sub[0] === 'diff' && sub.some(x => x.startsWith('--stat'))) return ok(` ${copyChanges(w).length} files changed\n`)
+      if (sub[0] === 'diff') return ok('diff --git a/x b/x\n')
+      if (sub[0] === 'apply') {
+        w.applied = run.cwd ?? ''
+        return ok('')
+      }
+      return ok('')
+    }
+    if (e.argv[0] === 'git' && e.argv.includes('ls-files') && e.argv.includes('-d')) return ok('')
+    if (e.argv[0] === 'git' && e.argv.includes('ls-files')) return ok(`${(w.copyFiles ?? ['src/a.ts']).join('\0')}\0`)
+    if (e.argv[0] === 'cmd.exe' && e.argv.includes('rmdir')) {
+      ;(w.removed ??= []).push(e.argv[e.argv.length - 1] ?? '')
+      return ok('')
     }
     if (e.argv[0] === 'git' && w.gitBroken) return ok('', "fatal: detected dubious ownership in repository at 'C:/proj'\n", 128)
     if (e.argv[0] === 'git' && !w.git) return ok('', 'fatal: not a git repository (or any of the parent directories): .git\n', 128)
@@ -437,7 +496,8 @@ test('read-only requests run in the sandbox; project access and writes ask first
   const write = w.ran.filter(x => x.argv[1] === 'exec').pop()
   expect(write?.argv).toContain('default_permissions="hubwrite"')
   expect(write?.argv).not.toContain('-s')
-  expect(write?.cwd).toBe('C:\\proj')
+  // in a copy of the folder, not the folder itself
+  expect(winPath(write?.cwd ?? '')).toMatch(/^C:\\Local\\\.claude\\jervis-ai-hub\\work\\run-\d+-[0-9a-f]{16}\\tree$/)
 })
 
 for (const mode of ['no-mxc', 'leaks'] as const) {
@@ -1412,12 +1472,12 @@ const A = 'a'.repeat(40)
 const B = 'b'.repeat(40)
 const REPO = () => ({ head: A, branch: 'main', refs: { 'refs/heads/main': A, 'refs/remotes/origin/main': A } })
 /** a world where Antigravity, the provider that still delegates through the relay, may write */
-const RELAY_WORLD = () => {
+const RELAY_WORLD = (extra: Record<string, unknown> = {}) => {
   const legacy = LEGACY()
   return world({
     ...legacy,
     'config-v2': { ...legacy['config-v2'], antigravity: { isConnected: true, isEnabled: true, model: 'gem-pro-high' } },
-    'hub-settings-v1': { ...DEFAULT_SETTINGS, allowUnboundedWrites: true },
+    'hub-settings-v1': { ...DEFAULT_SETTINGS, allowUnboundedWrites: true, ...extra },
   })
 }
 const DELEGATE = (w: World) => {
@@ -1467,7 +1527,7 @@ test('a delegation that commits anyway is refused, with what changed and how to 
   expect(r).toContain(`git reset --soft ${A}`)
   expect(r).toContain('The hub undid nothing')
   // the hub only read: no reset, checkout or push of its own
-  expect(w.ran.some(x => x.argv[0] === 'git' && /reset|checkout|push|update-ref/.test(x.argv.join(' ')))).toBe(false)
+  expect(w.ran.some(x => x.argv[0] === 'git' && !x.argv.some(a => a.startsWith('--git-dir=')) && /reset|checkout|push|update-ref/.test(x.argv.join(' ')))).toBe(false)
 })
 
 test('outside a git repository a delegation runs without the guard', async ($, on) => {
@@ -1513,10 +1573,12 @@ test('a relay result of this run is read: its status, with the files the hub its
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
+  w.answers = ['Allow', 'Apply']
   const r = JSON.parse(JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'fix it', repo: 'C:\\proj' } as never))) as { result: string }
   expect(r.result).toContain('relay completed')
-  expect(r.result).toContain("as read by the hub's own git")
-  expect(r.result).toContain('- src/b.ts\n- src/c.ts\n- src/new.ts\n- src/old.ts')
+  expect(r.result).toContain('Applied to C:\\proj, not staged or committed')
+  expect(r.result).toContain('- src/b.ts\n- src/c.ts (new)\n- src/new.ts (new)\n- src/old.ts (deleted)')
+  expect(w.applied).toBe('C:\\proj')
   // the relay's own list (src/a.ts) is never used, and a file left alone is not listed
   expect(r.result).not.toContain('src/a.ts')
   expect(r.result).not.toContain('notes.md')
@@ -1538,8 +1600,8 @@ test('a relay that says completed but exits with an error is not a success', asy
   expect(log.at(-1)?.state).toBe('error')
 })
 
-test('outside a git repository the hub says it cannot list the changed files', async ($, on) => {
-  const w = RELAY_WORLD()
+test('writing straight into the folder, outside a git repository the hub says it cannot list the changed files', async ($, on) => {
+  const w = RELAY_WORLD({ writeDirect: true })
   DELEGATE(w)
   w.git = undefined
   engine(on, w)
@@ -1576,11 +1638,11 @@ test('a Codex delegation is run by the hub under its write profile, not by the r
   const run = w.ran.filter(x => x.argv[1] === 'exec').pop()!
   expect(run.argv).toContain('default_permissions="hubwrite"')
   expect(run.argv).not.toContain('-s')
-  expect(winPath(run.cwd ?? '')).toBe('C:\\proj')
+  expect(winPath(run.cwd ?? '')).toMatch(/\\work\\run-\d+-[0-9a-f]{16}\\tree$/)
   expect(run.env?.GIT_CONFIG_KEY_0).toBe('core.hooksPath')
   expect(run.stdin).toContain('fix the bug')
   expect(run.stdin).toContain('do not commit, do not push')
-  expect(run.stdin).toContain('Git refs are locked')
+  expect(run.stdin).toContain('You are working in a copy of the project folder')
   const log = w.store['hub-activity-v1'] as { type: string; mode: string }[]
   expect(log.at(-1)?.type).toBe('delegate')
   expect(log.at(-1)?.mode).toBe('write')
@@ -1620,7 +1682,8 @@ test('an ask_ai write runs with git refs locked, like a delegation', async ($, o
   const run = w.ran.find(x => x.argv[1] === 'exec')!
   expect(run.env?.GIT_CONFIG_KEY_0).toBe('core.hooksPath')
   expect(run.env?.GIT_CONFIG_KEY_1).toBe('url.jervis-blocked://.pushInsteadOf')
-  expect(run.stdin).toContain('Git refs are locked')
+  // the copy has no .git: the prompt says it works in a copy
+  expect(run.stdin).toContain('You are working in a copy of the project folder')
 })
 
 test('an ask_ai write lists the files the hub saw change', async ($, on) => {
@@ -1630,11 +1693,118 @@ test('an ask_ai write lists the files the hub saw change', async ($, on) => {
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
+  w.answers = ['Allow', 'Apply']
   const r = JSON.stringify(await $.tool.call(WRITE as never))
-  expect(r).toContain("Files changed, as read by the hub's own git")
+  expect(r).toContain('Applied to C:\\\\proj, not staged or committed')
   expect(r).toContain('- src/x.ts')
-  // the list is the working tree's, not the agent's alone
+  // the question names the files' count, the patch, and asks before anything reaches the folder
+  const q = w.asked.at(-1) ?? ''
+  expect(q).toContain('changed 1 file in a copy of C:\\proj')
+  expect(q).toMatch(/The whole patch: .*\\work\\run-\d+-[0-9a-f]{16}\\changes\.patch/)
+  expect(w.applied).toBe('C:\\proj')
+})
+
+test('writing straight into the folder: the agent edits the folder, and the hub lists what changed there', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, writeDirect: true } })
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(winPath(w.ran.find(x => x.argv[1] === 'exec')?.cwd ?? '')).toBe('C:\\proj')
+  expect(r).toContain("Files changed, as read by the hub's own git")
   expect(r).toContain('by anyone: one you or another program made then is listed too')
+  expect(w.asked.at(-1)).toContain('change files in C:\\proj (ask_ai write mode)? Nothing is committed.')
+  expect(w.ran.some(x => x.argv.some(a => a.startsWith('--git-dir=')))).toBe(false)
+})
+
+test('kept for later, apply_changes asks again and applies on Apply', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Keep for later']
+  const first = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(first).toContain('Kept for later, not applied')
+  expect(w.applied).toBeUndefined()
+  const id = /run (run-\d+-[0-9a-f]{16})/.exec(first)?.[1] ?? ''
+  expect(id).not.toBe('')
+  w.answers = ['Apply']
+  const later = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__apply_changes', run: id } as never))
+  expect(later).toContain('Applied to C:\\\\proj')
+  expect(w.applied).toBe('C:\\proj')
+  // a run id that is not one is refused, and never read as a path
+  const bad = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__apply_changes', run: '..\\..\\secrets' } as never))
+  expect(bad).toContain('No kept changes with run id')
+})
+
+test('a dismissed review keeps the changes; Discard removes the copy and applies nothing', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Discard']
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(r).toContain('The person discarded the changes: nothing was applied')
+  expect(w.applied).toBeUndefined()
+  expect((w.removed ?? []).some(p => /\\work\\run-\d+-[0-9a-f]{16}$/.test(p))).toBe(true)
+  // a dialog closed without an answer applies nothing and loses nothing
+  w.work = {}
+  w.answers = ['Allow', 'something else']
+  const kept = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(kept).toContain('Kept for later, not applied')
+  expect(w.applied).toBeUndefined()
+})
+
+test('an Apply onto a file changed since the copy applies nothing and names the file', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  w.copyStale = ['src/x.ts']
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Apply']
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(r).toContain('Not applied: these files changed in the folder after the copy was made')
+  expect(r).toContain('- src/x.ts')
+  expect(r).toContain('The changes are kept')
+  expect(w.applied).toBeUndefined()
+})
+
+test('a copy that cannot be made refuses the write: nothing is sent', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.copyFails = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(r).toContain('could not make a copy of C:\\\\proj to work in')
+  expect(r).toContain('Write straight into the folder')
+  expect(w.ran.some(x => x.argv[1] === 'exec')).toBe(false)
+})
+
+test('a run that changes nothing asks nothing more, and secret files are left out of the copy by name', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.copyFiles = ['.env', 'src/a.ts', 'deploy/server.key', 'src/env.ts']
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const asked = w.asked.length
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(r).toContain('No files changed in the copy, so nothing was applied')
+  expect(r).toContain('Left out of the copy, by their names: .env, deploy/server.key')
+  // the write question only: no review question
+  expect(w.asked.length).toBe(asked + 1)
+  const add = w.ran.find(x => x.argv.includes('add') && x.argv.includes('--pathspec-from-file=-') && x.argv.includes('--work-tree=C:\\proj'))!
+  expect(add.stdin).toBe('src/a.ts\0src/env.ts\0')
 })
 
 test('an ask_ai write that commits anyway is refused, with how to undo it', async ($, on) => {
@@ -1722,8 +1892,11 @@ test('a request runs in the folder that was approved, not in the link', async ($
   await settle()
   await $.tool.call({ ...WRITE, cwd: 'C:\\link' } as never)
   expect(w.asked.at(-1)).toContain('C:\\link (which leads to C:\\real)')
-  expect(winPath(w.ran.find(x => x.argv[1] === 'exec')?.cwd ?? '')).toBe('C:\\real')
-  expect(winPath(w.ran.find(x => x.argv[1] === 'exec')?.env?.PWD ?? '')).toBe('C:\\real')
+  // the copy is made from where the link leads
+  expect(w.ran.some(x => x.argv.includes('--work-tree=C:\\real') && x.argv.includes('add'))).toBe(true)
+  const exec = w.ran.find(x => x.argv[1] === 'exec')!
+  expect(winPath(exec.env?.PWD ?? '')).toBe(winPath(exec.cwd ?? ''))
+  expect(winPath(exec.cwd ?? '')).toContain('\\work\\run-')
 })
 
 test('the relay writes its result where the hub tells it', async ($, on) => {
@@ -1734,7 +1907,9 @@ test('the relay writes its result where the hub tells it', async ($, on) => {
   await settle()
   await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'b', repo: 'C:\\proj' } as never)
   const relay = w.ran.find(x => x.argv.includes('--brief'))!
-  expect(winPath(relay.env?.PWD ?? '')).toBe('C:\\proj')
+  // the relay works in the copy
+  expect(winPath(relay.env?.PWD ?? '')).toMatch(/\\work\\run-\d+-[0-9a-f]{16}\\tree$/)
+  expect(winPath(relay.argv[relay.argv.indexOf('--cd') + 1] ?? '')).toBe(winPath(relay.env?.PWD ?? ''))
   const out = relay.argv[relay.argv.indexOf('--out-dir') + 1] ?? ''
   // under ~/.claude, not the temp folder a sandboxed agent may write
   expect(winPath(out)).toMatch(/^C:\\Local\\\.claude\\jervis-ai-hub\\relay\\run-\d+-[0-9a-f]{24}$/)
@@ -1815,7 +1990,7 @@ test('a Codex write is asked about with its folder alone', async ($, on) => {
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
   await $.tool.call(WRITE as never)
-  expect(w.asked.at(-1)).toContain('change files in C:\\proj')
+  expect(w.asked.at(-1)).toContain('change files in a copy of C:\\proj')
   expect(w.asked.at(-1)).not.toContain('not held')
 })
 

@@ -45,3 +45,5 @@ jobs:
           node-version: 20
       - name: Git guard with real git
         run: npx -y tsx@4.19.2 ci/real-gitguard.ts
+      - name: Workspace copy with real git
+        run: npx -y tsx@4.19.2 ci/real-workspace.ts

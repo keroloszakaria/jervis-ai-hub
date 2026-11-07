@@ -3,7 +3,7 @@
 A Claude Code mod that connects your other AI subscriptions and API keys (ChatGPT through Codex, Antigravity, OpenCode, DeepSeek, OpenRouter, MiniMax and more) and lets Claude ask, compare or delegate to them.
 
 - **Pane:** providers, models with effort, each provider's limits, activity and settings, in a black, white and neon orange design.
-- **Tools for Claude:** `ask_ai`, `compare_ai`, `delegate_ai`, `start_job` and `job_status`. You can also ask directly with `/ask-ai [provider] [task] your question`.
+- **Tools for Claude:** `ask_ai`, `compare_ai`, `delegate_ai`, `apply_changes`, `start_job` and `job_status`. You can also ask directly with `/ask-ai [provider] [task] your question`.
 - **Smart pick:** with a task and no provider, the hub picks the best connected model and effort, using only what each source reports and each provider's remaining limits. A fallback or a comparison uses each provider's best model too.
 - **Limits:** Codex plan windows, Antigravity `/usage`, your Claude session's windows, and the balance endpoints of DeepSeek, OpenRouter, Moonshot and SiliconFlow. Nothing is estimated. A toast warns at 80% and 95% of a window.
 - **Cost:** for API-key providers, the cost OpenCode recorded for each request, per provider and in total.
@@ -40,7 +40,7 @@ Open the pane with `/ai-providers`.
 
 - Type checking extends `.claude-plugin/types/tsconfig.json`, which Claude Code writes the first time it loads the mod (the folder is gitignored). Load the mod once, for example with `claude --plugin-dir <this folder>`, then run `npx -p typescript tsc -p .`.
 - Tests: `claude plugin test .` and `claude plugin validate .`. CI (`.github/workflows/ci.yml`) runs both on every push and pull request, and type-checks with `tsconfig.ci.json` against a copy of Claude Code's declarations in `vendor/` (see `vendor/README.md`).
-- The git guard is also checked with real git: `npx -y tsx@4.19.2 ci/real-gitguard.ts`. CI runs it on Linux, Windows and macOS.
+- The git guard is also checked with real git: `npx -y tsx@4.19.2 ci/real-gitguard.ts`, and the workspace copy with `npx -y tsx@4.19.2 ci/real-workspace.ts`. CI runs both on Linux, Windows and macOS.
 - The CLIs' isolation rules are checked with the real, signed-in CLIs by hand (it sends real prompts): `npx -y tsx@4.19.2 ci/real-cli.ts --opencode-model opencode/beam-free`. Name `opencode`, `agy` or `codex` to check some of them. It exits 0 only when every check passed (1 failed, 3 incomplete) and writes an evidence file under `~/.claude/jervis-ai-hub/evidence`.
 - Don't load a development copy and the installed plugin in the same session: both register the same tools and pane.
 

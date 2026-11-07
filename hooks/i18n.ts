@@ -195,6 +195,9 @@ const AR: Record<string, string> = {
   'allow writes not held to the folder (antigravity)': 'اسمح بكتابة مش محصورة في المجلد (Antigravity)',
   "antigravity's writes and delegations can change any file you can. codex and opencode writes stay in the folder you approve.":
     'كتابة Antigravity والتفويض بتاعه يقدروا يغيّروا أي ملف إنت تقدر تغيّره. كتابة Codex وOpenCode بتفضل جوه المجلد اللي وافقت عليه.',
+  'write straight into the folder': 'اكتب في المجلد نفسه على طول',
+  'off: a write runs in a copy without .git or secret files, and you choose whether its changes are applied. on: the agent edits your folder and can reach its .git.':
+    'مقفول: الكتابة بتحصل في نسخة من غير .git ومن غير ملفات سرّية، وإنت اللي بتقرر تطبّق التغييرات ولا لأ. شغّال: الـ agent بيعدّل في مجلدك على طول ويقدر يوصل للـ .git بتاعه.',
   'allow codex without read isolation': 'اسمح بـ Codex من غير حصر القراءة',
   "when codex's sandbox cannot hold it to the folder here (windows without mxc), codex is refused. with this on it runs, and can read any file your account can.":
     'لما الـ sandbox بتاع Codex مايقدرش يحصره في المجلد هنا (Windows من غير MXC)، Codex بيترفض. لو ده شغال، Codex بيشتغل ويقدر يقرا أي ملف في حسابك.',

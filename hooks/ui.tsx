@@ -1479,6 +1479,13 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           onPress={() => void saveSettings($, s => ({ ...s, allowUnboundedWrites: s.allowUnboundedWrites !== true }))}
         />
         <Toggle
+          id="write-direct"
+          on={st.writeDirect === true}
+          label="Write straight into the folder"
+          hint="Off: a write runs in a copy without .git or secret files, and you choose whether its changes are applied. On: the agent edits your folder and can reach its .git."
+          onPress={() => void saveSettings($, s => ({ ...s, writeDirect: s.writeDirect !== true }))}
+        />
+        <Toggle
           id="codex-unisolated"
           on={st.allowCodexUnisolated === true}
           label="Allow Codex without read isolation"
