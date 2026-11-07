@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.5
+
+Security fixes:
+
+- **OpenCode read-only requests can only read:** OpenCode's own default allows every tool, so a read-only request could write files and reach folders outside its own. A read-only request now runs with permissions (`OPENCODE_CONFIG_CONTENT`) that deny everything, allow reading, globbing and searching, and deny every folder outside the one it runs in. These rules win over a project's `opencode.json`. A write you allowed for a folder may not reach outside that folder.
+- **Antigravity read-only requests deny writes, commands, MCP tools and the web** for that run (`--settings`, never saved), whatever allow rules your own Antigravity settings hold. Reads inside the folder still work; a read outside it is refused, as headless mode cannot ask.
+- Codex keeps its own read-only sandbox, as before.
+
 ## 0.9.4
 
 Security fixes:

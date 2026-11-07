@@ -161,7 +161,40 @@ export async function sandboxDir($: EngineInterface): Promise<string> {
   return dir
 }
 
-export type Invocation = { argv: string[]; stdin?: string }
+export type Invocation = { argv: string[]; stdin?: string; env?: Record<string, string> }
+
+/**
+ * Antigravity, read-only: settings for this run only (`--settings`, never
+ * saved). Deny wins over any allow rule in the person's own settings, so the
+ * agent cannot write, run a command, call an MCP tool or open the web. Reads
+ * inside the folder stay allowed; a read outside it needs approval, which
+ * headless mode cannot give, so it is refused.
+ */
+export const AGY_READ_SETTINGS = JSON.stringify({
+  permissions: { deny: ['write_file(*)', 'command(*)', 'mcp(*)', 'read_url(*)', 'execute_url(*)'] },
+})
+
+/**
+ * OpenCode, read-only (`OPENCODE_CONFIG_CONTENT`): OpenCode's own default
+ * allows every tool, writes and paths outside the folder included, so a
+ * read-only request denies everything, then allows reading, globbing and
+ * searching, then denies every folder outside the one it runs in. The last
+ * matching rule wins; these come after a project's opencode.json.
+ */
+export const OPENCODE_READ_CONFIG = JSON.stringify({
+  permissions: [
+    { action: '*', resource: '*', effect: 'deny' },
+    { action: 'read', resource: '*', effect: 'allow' },
+    { action: 'glob', resource: '*', effect: 'allow' },
+    { action: 'grep', resource: '*', effect: 'allow' },
+    { action: 'external_directory', resource: '*', effect: 'deny' },
+  ],
+})
+
+/** OpenCode, a write the person allowed for one folder: nothing outside that folder. */
+export const OPENCODE_WRITE_CONFIG = JSON.stringify({
+  permissions: [{ action: 'external_directory', resource: '*', effect: 'deny' }],
+})
 
 /** The argument vector for one request; prompts go on stdin wherever the CLI reads it. */
 export function invocation(
@@ -180,12 +213,20 @@ export function invocation(
   }
   if (kind === 'agy') {
     return {
-      argv: [...argvOf(path), '--output-format', 'json', ...(model ? ['--model', model] : []), ...(mode === 'write' ? ['--mode', 'accept-edits'] : []), `-p=${prompt}`],
+      argv: [
+        ...argvOf(path),
+        '--output-format',
+        'json',
+        ...(model ? ['--model', model] : []),
+        ...(mode === 'write' ? ['--mode', 'accept-edits'] : ['--settings', AGY_READ_SETTINGS]),
+        `-p=${prompt}`,
+      ],
     }
   }
   return {
     argv: [...argvOf(path), 'run', '--standalone', '--format', 'json', ...(model ? ['-m', model] : []), ...(mode === 'write' ? ['--auto'] : [])],
     stdin: prompt,
+    env: { OPENCODE_CONFIG_CONTENT: mode === 'write' ? OPENCODE_WRITE_CONFIG : OPENCODE_READ_CONFIG },
   }
 }
 

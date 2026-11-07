@@ -5,6 +5,7 @@ import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
 import { redactKeys, snipWords } from '../hooks/activity'
 import { parseRefs, refChanges, undoHint } from '../hooks/gitguard'
+import { AGY_READ_SETTINGS } from '../hooks/cli'
 import { duration, size } from '../hooks/requests'
 import { effortForLevel, levelTag, rate } from '../hooks/levels'
 import type { ModelInfo } from '../types'
@@ -1323,4 +1324,45 @@ test('ref changes are named one by one', () => {
   ])
   // switching branches leaves nothing for reset --soft to do safely
   expect(undoHint(before, after)).toBeUndefined()
+})
+
+// read isolation for the CLIs without an OS sandbox of their own
+test('a read-only Antigravity request runs with write, commands, MCP and the web denied for that run', async ($, on) => {
+  const legacy = LEGACY()
+  const w = world({ ...legacy, 'config-v2': { ...legacy['config-v2'], antigravity: { isConnected: true, isEnabled: true, model: 'gem-pro-high' } } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(60)
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'antigravity', prompt: 'q' } as never)
+  const read = w.ran.filter(x => x.argv.includes('--output-format')).pop()!
+  const at = read.argv.indexOf('--settings')
+  expect(at).toBeGreaterThan(0)
+  const deny = (JSON.parse(read.argv[at + 1]!) as { permissions: { deny: string[] } }).permissions.deny
+  expect(deny).toEqual(['write_file(*)', 'command(*)', 'mcp(*)', 'read_url(*)', 'execute_url(*)'])
+  expect(read.argv[at + 1]).toBe(AGY_READ_SETTINGS)
+  // a write the person allowed keeps Antigravity's own edit mode, without the read-only settings
+  w.answer = 'Allow'
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'antigravity', prompt: 'w', mode: 'write' } as never)
+  const write = w.ran.filter(x => x.argv.includes('--output-format')).pop()!
+  expect(write.argv).toContain('accept-edits')
+  expect(write.argv).not.toContain('--settings')
+})
+
+test('a read-only OpenCode request may only read, glob and search, inside its folder; a write stays in its folder', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', prompt: 'q' } as never)
+  const read = w.ran.filter(x => x.argv[x.argv.length - 1] !== 'export' && x.argv.includes('run')).pop()!
+  const rules = (JSON.parse(read.env?.OPENCODE_CONFIG_CONTENT ?? '{}') as { permissions: { action: string; resource: string; effect: string }[] }).permissions
+  // last match wins: deny everything, allow the three read tools, then deny every outside folder
+  expect(rules.map(r => `${r.action}:${r.effect}`)).toEqual(['*:deny', 'read:allow', 'glob:allow', 'grep:allow', 'external_directory:deny'])
+  // the key still reaches the CLI beside it
+  expect(read.env?.DEEPSEEK_API_KEY).toBe(SECRET)
+  w.answer = 'Allow'
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', prompt: 'w', mode: 'write' } as never)
+  const write = w.ran.filter(x => x.argv.includes('--auto')).pop()!
+  const wrules = (JSON.parse(write.env?.OPENCODE_CONFIG_CONTENT ?? '{}') as { permissions: { action: string; effect: string }[] }).permissions
+  expect(wrules).toEqual([{ action: 'external_directory', resource: '*', effect: 'deny' }])
 })

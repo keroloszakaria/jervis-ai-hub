@@ -228,7 +228,10 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
       if (!secret) throw new Error('the saved API key could not be read from this account’s secure storage; connect it again')
       env = { [p.envVar]: secret }
     }
-    const { argv, stdin } = invocation(p.kind, path, a.prompt, a.mode, pick.cliModel, pick.effortArg)
+    const inv = invocation(p.kind, path, a.prompt, a.mode, pick.cliModel, pick.effortArg)
+    const { argv, stdin } = inv
+    // the CLI's own limits for this mode (OpenCode's permissions), then the key
+    if (inv.env) env = { ...inv.env, ...env }
     const runDir = a.cwd ?? (await sandboxDir($))
     const timeoutMs = timeoutFor(a.type, a.mode)
     const r = await runStoppable($, id, { argv, input: stdin, env, cwd: runDir }, timeoutMs)
