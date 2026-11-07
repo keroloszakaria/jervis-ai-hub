@@ -125,6 +125,14 @@ function engine(on: any, w: World) {
   })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: w.session ?? 's1' }))
+  // the plugin's own session.end hook runs first; the engine's end step answers last
+  on('session.end', async (_: unknown, e: { sessionId: string }, next: (e: unknown) => Promise<unknown>) => {
+    try {
+      return await next(e)
+    } catch {
+      return { sessionId: e.sessionId }
+    }
+  })
   on('store.get', (_: unknown, e: { key: string }) => ({ value: w.store[e.key] }))
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
     w.store[e.key] = JSON.parse(JSON.stringify(e.value))
@@ -1365,4 +1373,58 @@ test('a read-only OpenCode request may only read, glob and search, inside its fo
   const write = w.ran.filter(x => x.argv.includes('--auto')).pop()!
   const wrules = (JSON.parse(write.env?.OPENCODE_CONFIG_CONTENT ?? '{}') as { permissions: { action: string; effect: string }[] }).permissions
   expect(wrules).toEqual([{ action: 'external_directory', resource: '*', effect: 'deny' }])
+})
+
+// background jobs: one count for jobs started together, results that belong to one session
+const START = (title: string) => ({ tool: 'mcp__ai-subscriptions__start_job', title, prompt: `p ${title}`, level: 'heavy' }) as never
+
+test('six jobs started at the same moment start four, never more', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  w.hang = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const all = (await Promise.all([1, 2, 3, 4, 5, 6].map(i => $.tool.call(START(`j${i}`))))).map(r => JSON.stringify(r))
+  expect(all.filter(r => r.includes('Started job')).length).toBe(4)
+  expect(all.filter(r => r.includes('4 jobs are running already')).length).toBe(2)
+  const status = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status' } as never))
+  expect(status.match(/: running,/g)?.length).toBe(4)
+})
+
+test('a job that ends after its session ended reports nothing to the next one', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  w.hang = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call(START('Old')))
+  expect(r).toContain('Started job')
+  // the session ends (a /clear): its job on another AI is stopped, and its slot freed
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } } as never)
+  w.session = 's2'
+  await settle()
+  expect(w.appended?.some(x => x.type === 'user')).toBe(false)
+  expect(w.toasts.some(t => t.includes('job "Old"'))).toBe(false)
+  const status = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status' } as never))
+  expect(status).not.toContain('running')
+  expect(status).toContain('the result was dropped')
+  // its CLI never started: it was stopped while getting ready
+  expect(w.ran.filter(c => c.argv[1] === 'exec' || c.argv[1] === 'run').length).toBe(0)
+  for (let i = 0; i < 4; i++) expect(JSON.stringify(await $.tool.call(START(`n${i}`)))).toContain('Started job')
+})
+
+test('a whole result is read only by the session whose job it was', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  w.answerText = 'B'.repeat(5000)
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ ...(START('Mine') as object), level: 'light', provider: 'chatgpt' } as never))
+  const id = /job-[a-z0-9]+-[a-z0-9]+/.exec(r)![0]
+  await settle()
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status', id } as never))).toContain('B'.repeat(5000))
+  // another session asking by the same id gets no more than the row's short summary
+  w.session = 's2'
+  const other = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status', id } as never))
+  expect(other).not.toContain('B'.repeat(300))
 })

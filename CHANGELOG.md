@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.6
+
+Fixes for background jobs:
+
+- **Never more than four at once:** a slot is taken the moment `start_job` is called, before anything is awaited, so many jobs started together can no longer pass the limit between the check and the start.
+- **A job belongs to its session:** when a session ends (exit, `/clear`, resume), its jobs on another AI are stopped and their slots freed. A job that ends after its session did adds nothing to the next conversation: no result, toast or notice, and its row says the result was dropped. `job_status` gives a whole result only to the session whose job it was; another session sees the row's short summary.
+- **Results kept in bounds:** at most 50 results of up to 200,000 characters each are kept; the oldest go first.
+- **A stop before the CLI starts counts:** stopping a request (or a job) while it is still getting ready now stops it before its CLI starts, and nothing is sent. Before, that stop did nothing.
+
 ## 0.9.5
 
 Security fixes:

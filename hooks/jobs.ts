@@ -26,8 +26,62 @@ export const MAX_RUNNING = 4
 /** How much of a result goes into the conversation; the rest is a job_status call away. */
 export const REPORT_CHARS = 4000
 
-/** Full results, by job id: kept in memory for this session, never in state or the store. */
-const results = new Map<string, string>()
+/** How many ended jobs keep their whole result in memory, and how long one may be. */
+export const MAX_RESULTS = 50
+export const MAX_RESULT_CHARS = 200_000
+
+/**
+ * Full results, by job id, with the session that started the job: kept in
+ * memory only, never in state or the store. job_status reads only the asking
+ * session's, the oldest go past MAX_RESULTS, and a session's go when it ends.
+ */
+const results = new Map<string, { session: string; text: string }>()
+
+/**
+ * What runs now, counted without waiting on anything: a slot is taken before
+ * the first await of startJob, so jobs started at the same moment cannot pass
+ * MAX_RUNNING between a check and an add.
+ */
+const active = new Set<string>()
+/** Which session started each job, and the request a job on another AI runs. */
+const owner = new Map<string, string>()
+const requestOf = new Map<string, string>()
+let seq = 0
+/** The owner of a job whose session ended. */
+const ENDED = '\u0000ended'
+
+async function sessionOf($: EngineInterface): Promise<string> {
+  try {
+    return await $.session.id()
+  } catch {
+    return ''
+  }
+}
+
+function keep(id: string, session: string, text: string): void {
+  results.delete(id)
+  results.set(id, { session, text: text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[cut at ${MAX_RESULT_CHARS} characters]` : text })
+  while (results.size > MAX_RESULTS) results.delete(results.keys().next().value!)
+}
+
+/**
+ * The session ended (exit, /clear, resume): its jobs on another AI are
+ * stopped, since their results would have no conversation to go to, and its
+ * results are dropped. A subagent cannot be stopped from a mod; it ends with
+ * the session.
+ */
+export function endSessionJobs(session: string): void {
+  for (const [id, s] of owner) {
+    if (s !== session) continue
+    // kept as ended, so a late answer is dropped rather than taken for the next session's
+    owner.set(id, ENDED)
+    active.delete(id)
+    const req = requestOf.get(id)
+    requestOf.delete(id)
+    if (req) stopRequest(req)
+  }
+  for (const [id, r] of results) if (r.session === session) results.delete(id)
+}
 
 export type StartArgs = {
   title: string
@@ -77,13 +131,28 @@ export const describeJob = (j: Job): string => `"${j.title}" (${LEVEL_LABEL[j.le
 
 /** Starts one job and returns at once with its id, or says why it could not start. */
 export async function startJob($: EngineInterface, a: StartArgs): Promise<{ job?: Job; error?: string }> {
-  const list = await read($, jobs)
-  if (list.filter(j => j.state === 'running').length >= MAX_RUNNING) {
-    return { error: `${MAX_RUNNING} jobs are running already; wait for one to end (job_status).` }
+  const full = `${MAX_RUNNING} jobs are running already; wait for one to end (job_status).`
+  // take a slot before anything is awaited
+  if (active.size >= MAX_RUNNING) return { error: full }
+  const id = `job-${(++seq).toString(36)}${Math.random().toString(36).slice(2, 6)}-${Math.random().toString(36).slice(2, 6)}`
+  active.add(id)
+  try {
+    const r = await startIn($, a, id, full)
+    if (!r.job) active.delete(id)
+    return r
+  } catch (error) {
+    active.delete(id)
+    throw error
   }
+}
+
+async function startIn($: EngineInterface, a: StartArgs, id: string, full: string): Promise<{ job?: Job; error?: string }> {
+  // jobs left running from before a reload count too
+  const list = await read($, jobs)
+  if (list.filter(j => j.state === 'running' && !active.has(j.id)).length + active.size > MAX_RUNNING) return { error: full }
+  owner.set(id, await sessionOf($))
   const s = await read($, settings)
   const at = await $.clock.now()
-  const id = `job-${at.toString(36)}-${Math.random().toString(36).slice(2, 6)}`
   const base: Job = { id, title: a.title, level: a.level, runner: 'other-ai', state: 'running', startedAt: at }
 
   // where it runs: the runner asked for; on auto, another AI that serves the level, else a subagent
@@ -105,7 +174,15 @@ export async function startJob($: EngineInterface, a: StartArgs): Promise<{ job?
       mode: 'read',
       cwd: a.cwd,
       type: 'ask',
-      onStart: activityId => void patch($, id, j => ({ ...j, activityId })),
+      onStart: activityId => {
+        // its session ended before the request got going: stop it at once
+        if (owner.get(id) === ENDED) {
+          stopRequest(activityId)
+          return
+        }
+        requestOf.set(id, activityId)
+        void patch($, id, j => ({ ...j, activityId }))
+      },
     })
       .then(
         res => endFromRequest($, id, res),
@@ -179,10 +256,21 @@ async function endJob(
   text: string,
   extra: { tokens?: Job['tokens']; model?: string; quiet?: boolean } = {},
 ): Promise<void> {
+  active.delete(id)
+  requestOf.delete(id)
+  const started = owner.get(id)
+  const session = await sessionOf($)
   const at = await $.clock.now()
+  // the session that started it ended: the row ends, but nothing of the result
+  // may reach another conversation (a job from before a reload has no owner
+  // here; it stays this session's)
+  if (started !== undefined && started !== session) {
+    await patch($, id, j => ({ ...j, state, endedAt: at, summary: 'its session ended before it did; the result was dropped' }))
+    return
+  }
   // a subagent may have read a key from the project; another AI's answer was cleaned already
   text = redactKeys(text)
-  results.set(id, text)
+  keep(id, session, text)
   const summary = text.replace(/\s+/g, ' ').trim().slice(0, 240)
   await patch($, id, j => ({ ...j, state, endedAt: at, summary, tokens: extra.tokens ?? j.tokens, model: extra.model ?? j.model }))
   if (extra.quiet) return
@@ -230,7 +318,9 @@ export async function jobStatus($: EngineInterface, id?: string): Promise<string
     const j = list.find(x => x.id === id)
     if (!j) return `No job "${id}" in this session.`
     const head = `${describeJob(j)}: ${j.state}, ${duration((j.endedAt ?? now) - j.startedAt)}`
-    return j.state === 'running' ? `${head}. Still running.` : `${head}.\n${fenced(j, results.get(id) ?? j.summary ?? '')}`
+    const kept = results.get(id)
+    const text = kept && kept.session === (await sessionOf($)) ? kept.text : j.summary ?? ''
+    return j.state === 'running' ? `${head}. Still running.` : `${head}.\n${fenced(j, text)}`
   }
   if (!list.length) return 'No background jobs in this session.'
   return list

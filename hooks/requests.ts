@@ -54,11 +54,23 @@ const inFlight = new Map<string, Promise<RequestResult>>()
 /** The stop handle of each request still running, by its activity id. */
 const running = new Map<string, () => void>()
 
-/** Stops a running request: its CLI is ended and the request reads as stopped. False when it is not running. */
+/** Requests begun whose CLI has not started yet, and those of them stopped meanwhile. */
+const starting = new Set<string>()
+const stopSoon = new Set<string>()
+
+/**
+ * Stops a running request: its CLI is ended and the request reads as stopped.
+ * A request still getting ready never starts its CLI. False when it is not running.
+ */
 export function stopRequest(activityId: string): boolean {
   const stop = running.get(activityId)
-  stop?.()
-  return Boolean(stop)
+  if (stop) {
+    stop()
+    return true
+  }
+  if (!starting.has(activityId)) return false
+  stopSoon.add(activityId)
+  return true
 }
 
 /** Activity ids of the requests running now. */
@@ -78,6 +90,9 @@ async function runStoppable(
   req: { argv: string[]; cwd: string; env?: Record<string, string>; input?: string },
   timeoutMs: number,
 ): Promise<Ran> {
+  starting.delete(activityId)
+  // stopped while it got ready: nothing is sent
+  if (stopSoon.delete(activityId)) return { exitCode: -1, stdout: '', stderr: '', ended: 'cancelled' }
   const stream = $.process.spawn(req)
   let stop: (why: 'timeout' | 'cancelled') => void = () => undefined
   const stopped = new Promise<'timeout' | 'cancelled'>(resolve => (stop = resolve))
@@ -218,6 +233,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     prompt: a.prompt,
     fallbackFrom: a.fallbackFrom,
   })
+  starting.add(id)
   a.onStart?.(id)
   const started = await $.clock.now()
   let secret: string | undefined
@@ -292,6 +308,8 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     return { isOk: false, provider: a.providerId, model, effort, text: `${p.label} could not run: ${message}`, ms, errorKind: classifyError(message) }
   } finally {
     secret = undefined
+    starting.delete(id)
+    stopSoon.delete(id)
   }
 }
 

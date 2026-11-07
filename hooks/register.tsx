@@ -16,7 +16,7 @@ import { PROVIDERS, TASKS, provider } from './registry'
 import { STORE, loadPersisted, saveConfig } from './state'
 import { LEVELS, LEVEL_USE, isLevel } from './levels'
 import { GUIDE_ID, guideText } from './guide'
-import { jobStatus, onAgentTurn, startJob } from './jobs'
+import { endSessionJobs, jobStatus, onAgentTurn, startJob } from './jobs'
 import { renderBand } from './band'
 import { currentRules, recordSpawn, ruleFor } from './subagents'
 import { BG, renderPane } from './ui'
@@ -260,6 +260,16 @@ export const register: Register = on => {
       text = undefined
     }
     return text ? { sections: [...r.sections.filter(x => x.id !== GUIDE_ID), { id: GUIDE_ID, text, scope: 'session' as const }] } : r
+  })
+
+  // a session that ends takes its jobs and their results with it (exit, /clear, resume)
+  on('session.end', ($, e, next) => {
+    try {
+      endSessionJobs(e.sessionId)
+    } catch {
+      // the end of a session must not wait on the hub
+    }
+    return next(e)
   })
 
   // a job run by a subagent ends with that subagent's turn
