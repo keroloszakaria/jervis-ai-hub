@@ -46,4 +46,6 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
 ## Licenses
 
+Jervis AI Hub is released under the MIT License; see [LICENSE](LICENSE).
+
 Provider logos come from lobe-icons (MIT); see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

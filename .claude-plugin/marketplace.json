@@ -1,5 +1,6 @@
 {
   "name": "jervis-ai-hub",
   "owner": { "name": "keroloszakaria" },
+  "description": "Jervis AI Hub: use your other AI subscriptions and keys from Claude Code",
   "plugins": [{ "name": "ai-subscriptions", "source": "./" }]
 }
