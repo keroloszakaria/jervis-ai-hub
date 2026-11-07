@@ -102,6 +102,12 @@ const ok = (stdout: string, stderr = '', exitCode = 0) => ({
 })
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+/**
+ * On a Linux host (CI) the engine reads a Windows path as relative and puts its
+ * own folder in front of it; the tests lay files out by the Windows path alone.
+ */
+const winPath = (p: string): string => p.replace(/^.*\/(?=[A-Za-z]:\\)/, '')
+
 function engine(on: any, w: World) {
   on('command.register', () => ({ value: { command: 'ai-providers' } }))
   on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__ai-subscriptions__${e.name}` } }))
@@ -127,7 +133,7 @@ function engine(on: any, w: World) {
       : { value: e.name === 'TEMP' ? 'C:\\Temp' : 'C:\\Local' },
   )
   on('fs.list', () => ({ value: [{ name: 'abc', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }))
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: w.exists ? w.exists(e.path) : true }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: w.exists ? w.exists(winPath(e.path)) : true }))
   on('fs.write', (_: unknown, e: { path: string; content?: string; text?: string; data?: string }) => {
     ;(w.written ??= {})[e.path] = String(e.content ?? e.text ?? e.data ?? '')
     return { value: undefined }
@@ -186,7 +192,7 @@ function engine(on: any, w: World) {
     return { model: e.model === 'haiku' ? 'claude-haiku-5-5' : e.model ?? 'claude-opus-5-5', agentId: `a${w.spawned.length}` }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
-    const f = w.files?.[e.path]
+    const f = w.files?.[winPath(e.path)]
     if (f === undefined) throw new Error('ENOENT')
     return { value: f }
   })
