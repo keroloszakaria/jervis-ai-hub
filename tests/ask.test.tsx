@@ -79,7 +79,11 @@ type World = {
   git?: { head: string; branch?: string; refs: Record<string, string> }
   gitAfter?: { head: string; branch?: string; refs: Record<string, string> }
   /** what the relay leaves: a result for this run (default), none, one for another brief, or an unknown schema */
-  relay?: 'ok' | 'none' | 'foreign' | 'old-schema'
+  relay?: 'ok' | 'none' | 'foreign' | 'old-schema' | 'elsewhere'
+  /** symlinks or junctions: a path and the folder it leads to */
+  links?: Record<string, string>
+  /** git cannot read the repository (for example an unsafe-ownership refusal) */
+  gitBroken?: boolean
   /** what agy and opencode answer to --version (1.5.3 and 2.1.4 when absent) */
   versions?: { agy?: string; opencode?: string }
 }
@@ -210,6 +214,11 @@ function engine(on: any, w: World) {
     if (w.spawnDeny) return { deny: w.spawnDeny }
     return { model: e.model === 'haiku' ? 'claude-haiku-5-5' : e.model ?? 'claude-opus-5-5', agentId: `a${w.spawned.length}` }
   })
+  // a folder resolves to itself, or to where a link leads
+  on('fs.stat', (_: unknown, e: { path: string }) => {
+    const p = winPath(e.path)
+    return { value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: Boolean(w.links?.[p]), realPath: w.links?.[p] ?? p } }
+  })
   on('fs.read', (_: unknown, e: { path: string }) => {
     const f = w.files?.[winPath(e.path)]
     if (f === undefined) throw new Error('ENOENT')
@@ -224,6 +233,8 @@ function respond(w: World, run: Run) {
     const a = e.argv.join(' ')
     if ((e.argv[0] === 'where' || e.argv[0] === 'which') && w.paths?.[e.argv[1] ?? '']) return ok(`${w.paths[e.argv[1]!]}\n`)
     if ((e.argv[0] === 'where' || e.argv[0] === 'which') && w.shims?.[e.argv[1] ?? '']) return ok(`${w.shims[e.argv[1]!]}\n`)
+    if (e.argv[0] === 'git' && w.gitBroken) return ok('', "fatal: detected dubious ownership in repository at 'C:/proj'\n", 128)
+    if (e.argv[0] === 'git' && !w.git) return ok('', 'fatal: not a git repository (or any of the parent directories): .git\n', 128)
     if (e.argv[0] === 'git' && w.git) {
       const g = w.git
       const sub = e.argv.slice(3).join(' ')
@@ -237,7 +248,9 @@ function respond(w: World, run: Run) {
     // the relay copies the brief beside its result.json and names that file on stderr
     if (e.argv.includes('--brief') && w.relay !== 'none') {
       const brief = w.written?.[winPath(e.argv[e.argv.indexOf('--brief') + 1] ?? '')] ?? ''
-      const root = 'C:\\Temp\\relay\\run-1'
+      // the relay writes where --out-dir tells it to; 'elsewhere' writes to a folder of its own
+      const given = winPath(e.argv[e.argv.indexOf('--out-dir') + 1] ?? '')
+      const root = w.relay === 'elsewhere' ? 'C:\\Temp\\jervis-relay\\codex-1' : given
       const files = (w.files ??= {})
       files[`${root}\\brief.txt`] = w.relay === 'foreign' ? 'an older brief' : brief
       files[`${root}\\result.json`] = JSON.stringify({
@@ -649,6 +662,24 @@ test('a fallback provider gets the project only with its own yes; a no sends it 
   await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'secret plan 2', cwd: 'C:\\proj' } as never)
   const run = w.ran.find(x => x.argv[1] === 'run')
   expect(run?.cwd).toBe('C:\\proj')
+})
+
+test('a grant belongs to the folder a link leads to; a link elsewhere is asked about, with its target', async ($, on) => {
+  const w = world(LEGACY())
+  w.links = { 'C:\\proj-link': 'C:\\proj', 'C:\\innocent': 'C:\\secret' }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answer = 'Allow this session'
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'a', cwd: 'C:\\proj' } as never)
+  // the same folder through a link: already granted
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'b', cwd: 'C:\\proj-link' } as never)
+  expect(w.asked.length).toBe(1)
+  // a link to another folder: asked again, and told where it leads
+  w.answer = 'Deny'
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'c', cwd: 'C:\\innocent' } as never)
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[1]).toContain('C:\\innocent (which leads to C:\\secret)')
 })
 
 test('a session grant stays in its session, and folders keep their case on Linux', async ($, on) => {
@@ -1292,6 +1323,8 @@ const DELEGATE = (w: World) => {
   w.paths = { node: 'C:\\node\\node.exe' }
   w.git = REPO()
   w.answer = 'Allow'
+  // a file the relay left exists; the rest of the file system is there as before
+  w.exists = path => !path.includes('jervis-ai-hub\\relay\\') || path in (w.files ?? {})
 }
 
 test('a delegation runs with git refs locked and pushes sent nowhere', async ($, on) => {
@@ -1349,7 +1382,8 @@ test('outside a git repository a delegation runs without the guard', async ($, o
 })
 
 for (const [relay, why] of [
-  ['none', 'named no result file'],
+  ['none', 'left no result in the folder the hub gave it'],
+  ['elsewhere', 'left no result in the folder the hub gave it'],
   ['foreign', 'belongs to another run'],
   ['old-schema', 'unknown schema'],
 ] as const) {
@@ -1411,6 +1445,49 @@ test('an ask_ai write that commits anyway is refused, with how to undo it', asyn
   expect(r).toContain('HEAD moved from aaaaaaa to bbbbbbb')
   expect(r).toContain(`git reset --soft ${A}`)
   expect(r).toContain('The hub undid nothing')
+  // the run's own activity row reads as failed too
+  const log = w.store['hub-activity-v1'] as { state: string; error?: string }[]
+  expect(log.at(-1)?.state).toBe('error')
+  expect(log.at(-1)?.error).toContain('refused: HEAD moved')
+})
+
+test('a write or delegation in a repository git cannot read is refused before anything runs', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.gitBroken = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const write = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(write).toContain('its refs could not be read (fatal: detected dubious ownership')
+  expect(write).toContain('Nothing was sent')
+  const del = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never))
+  expect(del).toContain('so the delegation could not be checked. Nothing ran.')
+  expect(w.ran.some(x => x.argv[1] === 'exec' || x.argv.includes('--brief'))).toBe(false)
+})
+
+test('a folder git says is not a repository is written without the guard', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.git = undefined
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(r).not.toContain('Refused')
+  expect(w.ran.find(x => x.argv[1] === 'exec')?.env?.GIT_CONFIG_COUNT).toBeUndefined()
+})
+
+test('the relay writes its result where the hub tells it', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never)
+  const relay = w.ran.find(x => x.argv.includes('--brief'))!
+  const out = relay.argv[relay.argv.indexOf('--out-dir') + 1] ?? ''
+  expect(winPath(out)).toMatch(/^C:\\Temp\\jervis-ai-hub\\relay\\run-\d+-[0-9a-f]{24}$/)
 })
 
 test('ref changes are named one by one', () => {

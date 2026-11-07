@@ -30,6 +30,8 @@ export type RequestResult = {
   usage?: Usage
   /** what kind of failure this was, when it failed */
   errorKind?: ErrorKind
+  /** the activity row of the run, so a check made afterwards can mark it failed */
+  activityId?: string
 }
 
 export type RequestArgs = {
@@ -266,7 +268,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
       const left = a.mode === 'write' ? ' Changes it made so far stay in the folder for review; nothing was retried.' : ''
       await finish($, id, { state: r.ended === 'cancelled' ? 'cancelled' : 'error', ms, error: why })
       await announce($, p.label, ms, r.ended)
-      return { isOk: false, provider: a.providerId, model, effort, text: `${p.label}: ${why}.${left}`, ms, errorKind: r.ended }
+      return { isOk: false, provider: a.providerId, model, effort, text: `${p.label}: ${why}.${left}`, ms, errorKind: r.ended, activityId: id }
     }
     const parsed = parse(p.kind, r.stdout, r.stderr, r.exitCode)
     // OpenCode prints no usage in its run output; it records tokens and cost on the session
@@ -304,13 +306,13 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
       // the plan's windows moved: read them again (local, no prompt sent)
       if (p.kind === 'codex') void refreshLimits($, a.providerId).catch(() => undefined)
     }
-    return { isOk: parsed.isOk, provider: a.providerId, model, effort, text, ms, usage: parsed.usage, errorKind }
+    return { isOk: parsed.isOk, provider: a.providerId, model, effort, text, ms, usage: parsed.usage, errorKind, activityId: id }
   } catch (error) {
     const ms = (await $.clock.now()) - started
     const message = redact(errText(error), secret ? [secret] : [])
     await finish($, id, { state: 'error', ms, error: message })
     await announce($, p.label, ms, 'error')
-    return { isOk: false, provider: a.providerId, model, effort, text: `${p.label} could not run: ${message}`, ms, errorKind: classifyError(message) }
+    return { isOk: false, provider: a.providerId, model, effort, text: `${p.label} could not run: ${message}`, ms, errorKind: classifyError(message), activityId: id }
   } finally {
     secret = undefined
     starting.delete(id)

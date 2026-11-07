@@ -37,6 +37,26 @@ export function canonicalDir(os: OsName, dir: string): string {
   return os === 'linux' ? d : d.toLowerCase()
 }
 
+/**
+ * Where a folder really is: a symlink or junction followed to its target, so a
+ * grant belongs to the folder itself and a link to another folder is asked
+ * about on its own. A path the file system cannot resolve stays as written.
+ */
+export async function realDir($: EngineInterface, dir: string): Promise<string> {
+  try {
+    return (await $.fs.stat(dir, { resolve: true })).realPath ?? dir
+  } catch {
+    return dir
+  }
+}
+
+/** The folder as the person named it, and where it leads when that is somewhere else. */
+async function place($: EngineInterface, dir: string): Promise<{ real: string; shown: string }> {
+  const os = await osName($)
+  const real = await realDir($, dir)
+  return { real: canonicalDir(os, real), shown: canonicalDir(os, real) === canonicalDir(os, dir) ? dir : `${dir} (which leads to ${real})` }
+}
+
 /** Asks the person in the engine's own dialog; a dismissed dialog is a no. */
 async function confirm($: EngineInterface, question: string, options: string[]): Promise<string | undefined> {
   try {
@@ -49,10 +69,11 @@ async function confirm($: EngineInterface, question: string, options: string[]):
 export async function allowProjectRead($: EngineInterface, providerId: string, dir: string): Promise<boolean> {
   if (!(await read($, settings)).confirmProjectAccess) return true
   const session = await sessionKey($)
-  const grant = `${session}|${providerId}|${canonicalDir(await osName($), dir)}`
+  const { real, shown } = await place($, dir)
+  const grant = `${session}|${providerId}|${real}`
   if (session && readGrants.has(grant)) return true
   const label = provider(providerId)?.label ?? providerId
-  const answer = await confirm($, `Let ${label} read the files in ${dir}? Their contents go to that provider.`, [
+  const answer = await confirm($, `Let ${label} read the files in ${shown}? Their contents go to that provider.`, [
     'Allow once',
     'Allow this session',
     'Deny',
@@ -63,7 +84,8 @@ export async function allowProjectRead($: EngineInterface, providerId: string, d
 
 export async function allowWrite($: EngineInterface, providerId: string, dir: string, how: string): Promise<boolean> {
   const label = provider(providerId)?.label ?? providerId
-  const answer = await confirm($, `Let ${label} change files in ${dir} (${how})? Nothing is committed.`, ['Allow', 'Deny'])
+  const { shown } = await place($, dir)
+  const answer = await confirm($, `Let ${label} change files in ${shown} (${how})? Nothing is committed.`, ['Allow', 'Deny'])
   return answer === 'Allow'
 }
 

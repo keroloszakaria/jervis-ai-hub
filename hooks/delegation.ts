@@ -35,26 +35,29 @@ function runToken(): string {
 const samePath = (a: string, b: string) => a.replace(/\\/g, '/').toLowerCase() === b.replace(/\\/g, '/').toLowerCase()
 
 /**
- * Why a result.json cannot be trusted as this run's, or undefined when it can:
- * the relay's v1 schema, the agent that was asked, the file the relay named,
- * and the brief the relay kept beside it carrying this run's token.
+ * Why a result.json cannot be trusted as this run's, or undefined when it can.
+ * It is read from the folder the hub gave the relay (--out-dir), never from a
+ * path the run reports, and must have the relay's v1 schema, the agent that was
+ * asked, its own place in that folder, and the brief the relay copied there
+ * carrying this run's token. This binds a result to its run; it is not a
+ * boundary against an agent that may write anywhere (Antigravity's delegation).
  */
 export async function resultProblem(
   $: EngineInterface,
   result: Record<string, unknown> | undefined,
-  want: { agent: string; resultPath?: string; token: string },
+  want: { agent: string; resultPath: string; briefPath: string; token: string; isMissing?: boolean },
 ): Promise<string | undefined> {
-  if (!want.resultPath) return 'the relay named no result file'
+  if (want.isMissing) return 'it left no result in the folder the hub gave it'
   if (!result) return 'its result file could not be read as JSON'
   if (result.schema !== 'jervis-relay.result.v1') return `its result has an unknown schema (${String(result.schema)})`
   if (result.agent !== want.agent) return `its result is from another agent (${String(result.agent)})`
   if (typeof result.status !== 'string' || !result.status) return 'its result has no status'
   const artifacts = (result.artifacts ?? {}) as { result?: unknown; brief?: unknown }
   if (typeof artifacts.result !== 'string' || !samePath(artifacts.result, want.resultPath)) return 'its result names another result file'
-  if (typeof artifacts.brief !== 'string') return 'its result names no brief'
+  if (typeof artifacts.brief !== 'string' || !samePath(artifacts.brief, want.briefPath)) return 'its result names another brief'
   let brief = ''
   try {
-    brief = await $.fs.read(artifacts.brief)
+    brief = await $.fs.read(want.briefPath)
   } catch {
     return 'the brief beside its result could not be read'
   }
@@ -106,11 +109,22 @@ export async function delegate(
   const guard =
     '\n\nRules from the orchestrator: do not commit, do not push, keep changes inside this repository, and report what you changed. ' +
     `${LOCK_NOTE}\n`
-  const token = runToken()
-  await $.fs.write(briefPath, `${brief}${guard}\nRun: ${token}\n`)
-
   // the refs as they are before anything runs, read by the hub's own git
   const before = await snapshot($, repo)
+  if (before.failed) {
+    return {
+      isOk: false,
+      status: 'git-unchecked',
+      text: `Refused: ${repo} looks like a git repository, but its refs could not be read (${before.failed}), so the delegation could not be checked. Nothing ran.`,
+    }
+  }
+
+  const token = runToken()
+  await $.fs.write(briefPath, `${brief}${guard}\nRun: ${token}\n`)
+  // the hub names the relay's artifact folder itself, so it reads the result from
+  // where it expects it, never from a path the run reports
+  const outDir = joinPath(os, await tempDir($), 'jervis-ai-hub', 'relay', `run-${stamp}-${token}`)
+  const resultPath = joinPath(os, outDir, 'result.json')
 
   // The relay finds the CLI on PATH; a stale shim there must not shadow the working build.
   const cli = await exe($, p.kind)
@@ -132,7 +146,7 @@ export async function delegate(
   let code: number | null = null
   try {
     const stream = $.process.spawn({
-      argv: [node, script, '--brief', briefPath, '--cd', repo, '--mode', 'workspace-write', ...(model ? ['--model', model] : [])],
+      argv: [node, script, '--brief', briefPath, '--cd', repo, '--out-dir', outDir, '--mode', 'workspace-write', ...(model ? ['--model', model] : [])],
       cwd: repo,
       env,
     })
@@ -144,16 +158,22 @@ export async function delegate(
     return { isOk: false, text: `The relay could not start: ${errText(error)}` }
   }
   const ms = (await $.clock.now()) - started
-  const resultPath = /[A-Za-z]:\\[^\r\n"]*result\.json|\/[^\s"]*result\.json/.exec(clean(stderr))?.[0]
   let result: Record<string, unknown> | undefined
-  if (resultPath) {
+  const isMissing = !(await $.fs.exists(resultPath).catch(() => false))
+  if (!isMissing) {
     try {
       result = JSON.parse(await $.fs.read(resultPath)) as Record<string, unknown>
     } catch {
-      // reported below without it
+      // not JSON: reported below
     }
   }
-  const problem = await resultProblem($, result, { agent: p.relaySkill.replace(/-delegate$/, ''), resultPath, token })
+  const problem = await resultProblem($, result, {
+    agent: p.relaySkill.replace(/-delegate$/, ''),
+    resultPath,
+    briefPath: joinPath(os, outDir, 'brief.txt'),
+    token,
+    isMissing,
+  })
   if (problem) result = undefined
   const git = (result?.git ?? {}) as { touchedFiles?: unknown; commitViolation?: unknown }
   const touched = Array.isArray(git.touchedFiles) ? git.touchedFiles.filter((f): f is string => typeof f === 'string') : undefined

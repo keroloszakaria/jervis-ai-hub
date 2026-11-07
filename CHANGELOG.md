@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.8
+
+Security fixes:
+
+- **A refused write reads as failed in the activity log:** when an `ask_ai` write is refused because git refs changed, its own activity row now says so too, so the log and its counts match what Claude was told.
+- **A git check that fails stops the write:** a folder git calls "not a git repository" is written without the guard, as before. A folder with a `.git` whose refs git cannot read (git missing, an unsafe-ownership refusal, refs that cannot be listed) is refused before anything runs, for `ask_ai` writes and delegations alike. Refs that cannot be read afterwards refuse the result.
+- **The hub picks where the relay writes its result:** a delegation passes `--out-dir`, a folder in the hub's temp folder named with the run's token, and reads `result.json` from there. It no longer reads a path from the relay's output or from the result itself.
+- **Folder approvals follow links:** a project folder is approved by where a symlink or junction leads. A link to an approved folder is not asked again, and a link to another folder is asked about on its own, with its target named in the question.
+- `SECURITY.md` has a table of the CLI versions the isolation rules were checked on, what was checked and what is allowed, and says plainly that a relay result is bound to its run but not sealed against an agent that forges one.
+
 ## 0.9.7
 
 Security fixes:

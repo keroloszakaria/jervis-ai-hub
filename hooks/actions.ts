@@ -4,6 +4,7 @@ import { atom, read } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { Level, Task } from '../types'
+import { finish } from './activity'
 import { errText, timeoutFor } from './cli'
 import { delegate } from './delegation'
 import { guardEnv, LOCK_NOTE, refChanges, refusal, snapshot } from './gitguard'
@@ -59,9 +60,12 @@ export async function askTool(
   if (a.mode === 'write') {
     const dir = a.cwd ?? (await read($, cwd))
     if (!dir) return { isOk: false, text: 'Write mode needs a project folder (cwd).' }
-    if (!(await allowWrite($, providerId, dir, 'ask_ai write mode'))) return { isOk: false, text: 'The person declined: no files were changed.' }
     // the same git guard as a delegation: refs locked while it writes, and read before and after
     const before = await snapshot($, dir)
+    if (before.failed) {
+      return { isOk: false, text: `Refused: ${dir} looks like a git repository, but its refs could not be read (${before.failed}), so the write could not be checked. Nothing was sent.` }
+    }
+    if (!(await allowWrite($, providerId, dir, 'ask_ai write mode'))) return { isOk: false, text: 'The person declined: no files were changed.' }
     const env = before.isRepo ? await guardEnv($, await osName($)) : undefined
     const prompt = before.isRepo ? `${a.prompt}\n\nRules from the orchestrator: do not commit or push. ${LOCK_NOTE}` : a.prompt
     const r = await runRequest($, { providerId, model, effort, prompt, mode: 'write', cwd: dir, type: 'ask', task: a.task, env })
@@ -69,10 +73,10 @@ export async function askTool(
       const after = await snapshot($, dir)
       const changed = refChanges(before, after)
       if (changed.length) {
-        return {
-          isOk: false,
-          text: [`${header(r)}\nRefused: git refs changed during the write, which it must never do.`, ...refusal(before, after, changed)].join('\n'),
-        }
+        const why = after.failed ? 'the git refs could not be checked after the write' : 'git refs changed during the write, which it must never do'
+        // the run's own row reads as failed too, so the activity log and its counts agree
+        if (r.activityId) await finish($, r.activityId, { state: 'error', error: `refused: ${changed.join('; ')}` })
+        return { isOk: false, text: [`${header(r)}\nRefused: ${why}.`, ...refusal(before, after, changed)].join('\n') }
       }
     }
     return { isOk: r.isOk, text: `${header(r)}\n${r.text}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}` }

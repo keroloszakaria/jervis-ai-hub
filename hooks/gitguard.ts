@@ -10,7 +10,7 @@
 // never undoes anything on its own: it says what changed and how to undo it.
 import type { EngineInterface } from 'claude-code'
 
-import { joinPath, type OsName, tempDir } from './platform'
+import { joinPath, osName, type OsName, tempDir } from './platform'
 
 export type RefSnapshot = {
   isRepo: boolean
@@ -19,6 +19,8 @@ export type RefSnapshot = {
   branch?: string
   /** every ref (branches, tags, remote-tracking, stash) and the object it names */
   refs: Record<string, string>
+  /** why the refs could not be read, when the folder is (or may be) a repository: nothing is known */
+  failed?: string
 }
 
 const HOOK_REFUSE = (what: string) =>
@@ -47,12 +49,33 @@ async function git($: EngineInterface, repo: string, args: string[]): Promise<st
   }
 }
 
-/** What the repository's refs are now, read by the hub's own git, without the guard. */
+/**
+ * What the repository's refs are now, read by the hub's own git, without the
+ * guard. A folder git calls "not a git repository" is not one. Any other
+ * failure (git missing or timing out, an unsafe-ownership refusal, refs that
+ * cannot be listed) in a folder that has a .git is `failed`: a write there must
+ * not run unchecked.
+ */
 export async function snapshot($: EngineInterface, repo: string): Promise<RefSnapshot> {
-  if ((await git($, repo, ['rev-parse', '--is-inside-work-tree']))?.trim() !== 'true') return { isRepo: false, refs: {} }
+  let probe: { exitCode: number; stdout: string; stderr: string } | undefined
+  try {
+    probe = await $.process.run(['git', '-C', repo, 'rev-parse', '--is-inside-work-tree'], { timeoutMs: 20_000 })
+  } catch {
+    probe = undefined
+  }
+  if (probe?.exitCode === 0 && probe.stdout.trim() !== 'true') return { isRepo: false, refs: {} }
+  if (probe && probe.exitCode !== 0 && /not a git repository/i.test(probe.stderr)) return { isRepo: false, refs: {} }
+  if (!probe || probe.exitCode !== 0) {
+    const hasGit = await $.fs.exists(joinPath(await osName($), repo, '.git')).catch(() => true)
+    if (!hasGit) return { isRepo: false, refs: {} }
+    const why = probe ? (probe.stderr.trim().split(/\r?\n/)[0] ?? '') || `git exited with ${probe.exitCode}` : 'git could not run'
+    return { isRepo: true, refs: {}, failed: why }
+  }
   const head = (await git($, repo, ['rev-parse', '--verify', '-q', 'HEAD']))?.trim() || undefined
   const branch = (await git($, repo, ['symbolic-ref', '-q', '--short', 'HEAD']))?.trim() || undefined
-  return { isRepo: true, head, branch, refs: parseRefs((await git($, repo, ['for-each-ref', '--format=%(objectname) %(refname)'])) ?? '') }
+  const listed = await git($, repo, ['for-each-ref', '--format=%(objectname) %(refname)'])
+  if (listed === undefined) return { isRepo: true, refs: {}, failed: 'its refs could not be listed' }
+  return { isRepo: true, head, branch, refs: parseRefs(listed) }
 }
 
 /** `for-each-ref --format='%(objectname) %(refname)'` lines, as a map from ref to object. */
@@ -69,6 +92,7 @@ const short = (sha?: string) => (sha ? sha.slice(0, 7) : 'none')
 
 /** Every way the refs differ, in words; empty when nothing changed. */
 export function refChanges(before: RefSnapshot, after: RefSnapshot): string[] {
+  if (after.failed) return [`the refs could not be read afterwards (${after.failed}), so whether they changed is unknown`]
   if (!before.isRepo || !after.isRepo) return before.isRepo === after.isRepo ? [] : ['the folder stopped (or started) being a git repository']
   const out: string[] = []
   if (before.head !== after.head) out.push(`HEAD moved from ${short(before.head)} to ${short(after.head)}`)
