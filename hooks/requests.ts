@@ -254,8 +254,10 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     const inv = invocation(p.kind, path, a.prompt, a.mode, pick.cliModel, pick.effortArg)
     const { argv, stdin } = inv
     // the CLI's own limits for this mode (OpenCode's permissions), then the key
-    if (inv.env || a.env) env = { ...inv.env, ...a.env, ...env }
     const runDir = a.cwd ?? (await sandboxDir($))
+    // PWD names the run's folder too: OpenCode takes its folder from PWD before the process's
+    // own, so a PWD inherited from the shell Claude started in would root it in that project
+    env = { ...inv.env, ...a.env, ...env, PWD: runDir }
     const timeoutMs = timeoutFor(a.type, a.mode)
     const r = await runStoppable($, id, { argv, input: stdin, env, cwd: runDir }, timeoutMs)
     env = undefined

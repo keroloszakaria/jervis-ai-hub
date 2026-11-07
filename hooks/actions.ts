@@ -7,7 +7,7 @@ import type { Level, Task } from '../types'
 import { finish } from './activity'
 import { errText, timeoutFor } from './cli'
 import { delegate } from './delegation'
-import { guardEnv, LOCK_NOTE, refChanges, refusal, snapshot } from './gitguard'
+import { filesLine, guardEnv, LOCK_NOTE, refChanges, refusal, snapshot, workState } from './gitguard'
 import { allowProjectRead, allowWrite, folder } from './permissions'
 import { osName } from './platform'
 import { provider } from './registry'
@@ -62,6 +62,7 @@ export async function askTool(
     if (!named) return { isOk: false, text: 'Write mode needs a project folder (cwd).' }
     // resolved once: the folder approved is the folder written
     const f = await folder($, named)
+    if (f.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
     const dir = f.real
     // the same git guard as a delegation: refs locked while it writes, and read before and after
     const before = await snapshot($, dir)
@@ -70,6 +71,7 @@ export async function askTool(
     }
     if (!(await allowWrite($, providerId, dir, 'ask_ai write mode', f.shown))) return { isOk: false, text: 'The person declined: no files were changed.' }
     const env = before.isRepo ? await guardEnv($, await osName($)) : undefined
+    const workBefore = before.isRepo ? await workState($, dir) : undefined
     const prompt = before.isRepo ? `${a.prompt}\n\nRules from the orchestrator: do not commit or push. ${LOCK_NOTE}` : a.prompt
     const r = await runRequest($, { providerId, model, effort, prompt, mode: 'write', cwd: dir, type: 'ask', task: a.task, env })
     if (before.isRepo) {
@@ -82,10 +84,13 @@ export async function askTool(
         return { isOk: false, text: [`${header(r)}\nRefused: ${why}.`, ...refusal(before, after, changed)].join('\n') }
       }
     }
-    return { isOk: r.isOk, text: `${header(r)}\n${r.text}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}` }
+    // the files changed, as the hub's own git reads them
+    const files = filesLine(workBefore, before.isRepo ? await workState($, dir) : undefined)
+    return { isOk: r.isOk, text: `${header(r)}\n${r.text}\n\n${files}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}` }
   }
 
   const f = a.cwd ? await folder($, a.cwd) : undefined
+  if (f?.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
   if (f && !(await allowProjectRead($, providerId, f.real, f.shown))) {
     return { isOk: false, text: 'The person declined project access: nothing was sent.' }
   }
@@ -166,6 +171,7 @@ export async function delegateTool($: EngineInterface, providerId: string, brief
   const named = repo ?? (await read($, cwd))
   if (!named) return { isOk: false, text: 'Delegation needs a repository folder.' }
   const f = await folder($, named)
+  if (f.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
   if (!(await allowWrite($, providerId, f.real, 'Jervis Relay delegation', f.shown))) return { isOk: false, text: 'The person declined: nothing was delegated.' }
   try {
     const r = await delegate($, providerId, brief, f.real)

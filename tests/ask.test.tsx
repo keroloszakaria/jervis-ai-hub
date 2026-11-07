@@ -4,7 +4,7 @@ import { classifyError, mayFallBack, timeoutFor } from '../hooks/cli'
 import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
 import { redactKeys, snipWords } from '../hooks/activity'
-import { parentOf, parseRefs, refChanges, undoHint } from '../hooks/gitguard'
+import { changedFiles, parentOf, parseRefs, parseStatus, refChanges, undoHint } from '../hooks/gitguard'
 import { AGY_READ_SETTINGS, parseVersion, versionNote } from '../hooks/cli'
 import { duration, size } from '../hooks/requests'
 import { effortForLevel, levelTag, rate } from '../hooks/levels'
@@ -78,10 +78,17 @@ type World = {
   /** the repository's refs as git reports them; the relay run switches to `gitAfter` */
   git?: { head: string; branch?: string; refs: Record<string, string> }
   gitAfter?: { head: string; branch?: string; refs: Record<string, string> }
+  /** the working tree's changed files as git status reports them, path to [status, content]; the relay run switches to `workAfter` */
+  work?: Record<string, [string, string]>
+  workAfter?: Record<string, [string, string]>
+  /** the relay's exit code (0 when absent) */
+  relayCode?: number
   /** what the relay leaves: a result for this run (default), none, one for another brief, or an unknown schema */
   relay?: 'ok' | 'none' | 'foreign' | 'old-schema' | 'elsewhere'
   /** symlinks or junctions: a path and the folder it leads to */
   links?: Record<string, string>
+  /** folders the file system cannot resolve */
+  missing?: string[]
   /** git cannot read the repository (for example an unsafe-ownership refusal) */
   gitBroken?: boolean
   /** what agy and opencode answer to --version (1.5.3 and 2.1.4 when absent) */
@@ -121,7 +128,7 @@ const ok = (stdout: string, stderr = '', exitCode = 0) => ({
  * On a Linux host (CI) the engine reads a Windows path as relative and puts its
  * own folder in front of it; the tests lay files out by the Windows path alone.
  */
-const winPath = (p: string): string => p.replace(/^.*\/(?=[A-Za-z]:\\)/, '')
+const winPath = (p: string): string => p.replace(/^.*\/(?=[A-Za-z]:[\\/])/, '')
 
 function engine(on: any, w: World) {
   on('command.register', () => ({ value: { command: 'ai-providers' } }))
@@ -214,11 +221,11 @@ function engine(on: any, w: World) {
     if (w.spawnDeny) return { deny: w.spawnDeny }
     return { model: e.model === 'haiku' ? 'claude-haiku-5-5' : e.model ?? 'claude-opus-5-5', agentId: `a${w.spawned.length}` }
   })
-  // a link resolves to where it leads; the test's other folders are not on this disk,
-  // so, as the engine does for a path that leads nowhere, they have no realPath
+  // a folder resolves to itself, a link to where it leads, a missing one to nothing
   on('fs.stat', (_: unknown, e: { path: string }) => {
     const p = winPath(e.path)
-    return { value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: Boolean(w.links?.[p]), realPath: w.links?.[p] } }
+    if (w.missing?.includes(p)) throw new Error('ENOENT')
+    return { value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: Boolean(w.links?.[p]), realPath: w.links?.[p] ?? p } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
     const f = w.files?.[winPath(e.path)]
@@ -243,9 +250,19 @@ function respond(w: World, run: Run) {
       if (sub.startsWith('rev-parse --verify')) return ok(`${g.head}\n`)
       if (sub.startsWith('symbolic-ref')) return g.branch ? ok(`${g.branch}\n`) : ok('', '', 1)
       if (sub.startsWith('for-each-ref')) return ok(Object.entries(g.refs).map(([r, s]) => `${s} ${r}`).join('\n'))
+      if (sub === 'rev-parse --show-toplevel') return ok('C:/proj\n')
+      if (sub.startsWith('status --porcelain=v1 -z')) {
+        // a rename names its old path after the new one
+        return ok(Object.entries(w.work ?? {}).map(([f, [xy]]) => (xy.includes('R') ? `${xy} ${f.split('<-')[0]}\0${f.split('<-')[1]}` : `${xy} ${f}`)).join('\0'))
+      }
+      if (sub === 'hash-object --stdin-paths') {
+        const work = Object.fromEntries(Object.entries(w.work ?? {}).map(([f, v]) => [f.split('<-')[0]!, v]))
+        return ok((run.stdin ?? '').split('\n').filter(Boolean).map(f => `hash-of-${work[f]?.[1] ?? 'nothing'}`).join('\n') + '\n')
+      }
     }
     // the relay: from here on git reports what the agent left
     if ((e.argv.includes('--brief') || e.argv[1] === 'exec') && w.gitAfter) w.git = w.gitAfter
+    if ((e.argv.includes('--brief') || e.argv[1] === 'exec') && w.workAfter) w.work = w.workAfter
     // the relay copies the brief beside its result.json and names that file on stderr
     if (e.argv.includes('--brief') && w.relay !== 'none') {
       const brief = w.written?.[winPath(e.argv[e.argv.indexOf('--brief') + 1] ?? '')] ?? ''
@@ -263,7 +280,7 @@ function respond(w: World, run: Run) {
         artifacts: { root, brief: `${root}\\brief.txt`, result: `${root}\\result.json` },
         git: { touchedFiles: ['src/a.ts'], commitViolation: false },
       })
-      return ok('done\n', `Jervis Relay: completed; result=${root}\\result.json\n`)
+      return ok('done\n', `Jervis Relay: completed; result=${root}\\result.json\n`, w.relayCode ?? 0)
     }
     if (e.argv[0] === 'where' || e.argv[0] === 'which') return ok('', 'not found', 1)
     // each CLI's --version, in its own format
@@ -681,6 +698,26 @@ test('a grant belongs to the folder a link leads to; a link elsewhere is asked a
   await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'c', cwd: 'C:\\innocent' } as never)
   expect(w.asked.length).toBe(2)
   expect(w.asked[1]).toContain('C:\\innocent (which leads to C:\\secret)')
+})
+
+test('a folder that cannot be resolved is refused: nothing is asked, sent or written', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.missing = ['C:\\gone']
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  for (const call of [
+    { tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q', cwd: 'C:\\gone' },
+    { ...WRITE, cwd: 'C:\\gone' },
+    { tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\gone' },
+    { tool: 'mcp__ai-subscriptions__start_job', title: 'J', prompt: 'p', level: 'light', provider: 'chatgpt', cwd: 'C:\\gone' },
+  ]) {
+    const r = JSON.stringify(await $.tool.call(call as never))
+    expect(r).toContain('C:\\\\gone could not be resolved to a real folder')
+  }
+  expect(w.asked.length).toBe(0)
+  expect(w.ran.some(x => x.argv[1] === 'exec' || x.argv.includes('--brief'))).toBe(false)
 })
 
 test('a session grant stays in its session, and folders keep their case on Linux', async ($, on) => {
@@ -1404,18 +1441,59 @@ for (const [relay, why] of [
   })
 }
 
-test('a relay result of this run is read: its files and status', async ($, on) => {
+test('a relay result of this run is read: its status, with the files the hub itself saw change', async ($, on) => {
   const w = world(LEGACY())
   DELEGATE(w)
+  // already changed before and left alone; already changed and changed again; new; renamed
+  w.work = { 'notes.md': [' M', 'mine'], 'src/b.ts': [' M', 'v1'] }
+  w.workAfter = { 'notes.md': [' M', 'mine'], 'src/b.ts': [' M', 'v2'], 'src/new.ts': ['??', 'n'], 'src/c.ts<-src/old.ts': ['R ', 'c'] }
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
-  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix it', repo: 'C:\\proj' } as never))
-  expect(r).toContain('relay completed')
-  expect(r).toContain('src/a.ts')
+  const r = JSON.parse(JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix it', repo: 'C:\\proj' } as never))) as { result: string }
+  expect(r.result).toContain('relay completed')
+  expect(r.result).toContain("as read by the hub's own git")
+  expect(r.result).toContain('- src/b.ts\n- src/c.ts\n- src/new.ts\n- src/old.ts')
+  // the relay's own list (src/a.ts) is never used, and a file left alone is not listed
+  expect(r.result).not.toContain('src/a.ts')
+  expect(r.result).not.toContain('notes.md')
   // the brief carries the run's token
   const brief = Object.entries(w.written ?? {}).find(([k]) => k.includes('briefs'))?.[1] ?? ''
   expect(brief).toMatch(/\nRun: [0-9a-f]{24}\n/)
+})
+
+test('a relay that says completed but exits with an error is not a success', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.relayCode = 2
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix it', repo: 'C:\\proj' } as never)
+  expect(JSON.stringify(r)).toContain('relay completed but exited with 2')
+  const log = w.store['hub-activity-v1'] as { state: string }[]
+  expect(log.at(-1)?.state).toBe('error')
+})
+
+test('outside a git repository the hub says it cannot list the changed files', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.git = undefined
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never))
+  expect(r).toContain('The hub cannot list the changed files here')
+  expect(r).not.toContain('src/a.ts')
+})
+
+test('changed files: a status or content change counts, both paths of a rename, nothing else', () => {
+  expect(parseStatus(' M a.ts\0R  new.ts\0old.ts\0?? n.ts\0')).toEqual({ 'a.ts': ' M', 'new.ts': 'R ', 'old.ts': 'from', 'n.ts': '??' })
+  const before = { files: { 'a.ts': ' M:1', 'same.ts': ' M:9' }, isPartial: false }
+  const after = { files: { 'a.ts': ' M:2', 'same.ts': ' M:9', 'n.ts': '??:3' }, isPartial: false }
+  expect(changedFiles(before, after)).toEqual(['a.ts', 'n.ts'])
+  // a file put back as it was is no longer changed, and is listed
+  expect(changedFiles(after, { files: { 'same.ts': ' M:9' }, isPartial: false })).toEqual(['a.ts', 'n.ts'])
 })
 
 const WRITE = { tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', mode: 'write', cwd: 'C:\\proj', prompt: 'fix the bug' }
@@ -1432,6 +1510,18 @@ test('an ask_ai write runs with git refs locked, like a delegation', async ($, o
   expect(run.env?.GIT_CONFIG_KEY_0).toBe('core.hooksPath')
   expect(run.env?.GIT_CONFIG_KEY_1).toBe('url.jervis-blocked://.pushInsteadOf')
   expect(run.stdin).toContain('Git refs are locked')
+})
+
+test('an ask_ai write lists the files the hub saw change', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(r).toContain("Files changed, as read by the hub's own git")
+  expect(r).toContain('- src/x.ts')
 })
 
 test('an ask_ai write that commits anyway is refused, with how to undo it', async ($, on) => {
@@ -1520,6 +1610,7 @@ test('a request runs in the folder that was approved, not in the link', async ($
   await $.tool.call({ ...WRITE, cwd: 'C:\\link' } as never)
   expect(w.asked.at(-1)).toContain('C:\\link (which leads to C:\\real)')
   expect(winPath(w.ran.find(x => x.argv[1] === 'exec')?.cwd ?? '')).toBe('C:\\real')
+  expect(winPath(w.ran.find(x => x.argv[1] === 'exec')?.env?.PWD ?? '')).toBe('C:\\real')
 })
 
 test('the relay writes its result where the hub tells it', async ($, on) => {
@@ -1530,6 +1621,7 @@ test('the relay writes its result where the hub tells it', async ($, on) => {
   await settle()
   await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never)
   const relay = w.ran.find(x => x.argv.includes('--brief'))!
+  expect(winPath(relay.env?.PWD ?? '')).toBe('C:\\proj')
   const out = relay.argv[relay.argv.indexOf('--out-dir') + 1] ?? ''
   // under ~/.claude, not the temp folder a sandboxed agent may write
   expect(winPath(out)).toMatch(/^C:\\Local\\\.claude\\jervis-ai-hub\\relay\\run-\d+-[0-9a-f]{24}$/)
@@ -1582,11 +1674,14 @@ test('a read-only OpenCode request may only read, glob and search, inside its fo
   expect(rules.map(r => `${r.action}:${r.effect}`)).toEqual(['*:deny', 'read:allow', 'glob:allow', 'grep:allow', 'external_directory:deny'])
   // the key still reaches the CLI beside it
   expect(read.env?.DEEPSEEK_API_KEY).toBe(SECRET)
+  // OpenCode takes its folder from PWD first: PWD names the run's own folder, never the shell's
+  expect(read.env?.PWD).toBe(read.cwd)
   w.answer = 'Allow'
   await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', prompt: 'w', mode: 'write' } as never)
   const write = w.ran.filter(x => x.argv.includes('--auto')).pop()!
   const wrules = (JSON.parse(write.env?.OPENCODE_CONFIG_CONTENT ?? '{}') as { permissions: { action: string; effect: string }[] }).permissions
-  expect(wrules).toEqual([{ action: 'external_directory', resource: '*', effect: 'deny' }])
+  // file tools only: no shell, no execute (both wrote outside the folder on 2.1.4)
+  expect(wrules.map(r => `${r.action}:${r.effect}`)).toEqual(['*:deny', 'read:allow', 'glob:allow', 'grep:allow', 'edit:allow', 'write:allow', 'external_directory:deny'])
 })
 
 for (const [version, what] of [

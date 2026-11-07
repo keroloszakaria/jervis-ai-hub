@@ -174,3 +174,73 @@ export async function guardEnv($: EngineInterface, os: OsName): Promise<Record<s
     [`GIT_CONFIG_VALUE_${n + 1}`]: '',
   }
 }
+
+/** The working tree's changed and untracked files, each with its status and content hash. */
+export type WorkState = { files: Record<string, string>; isPartial: boolean }
+
+/** At most this many changed files are compared; past it the list is marked partial. */
+export const MAX_WORK_FILES = 5000
+
+/** `git status --porcelain=v1 -z` entries as path to status; a rename or copy names both paths. */
+export function parseStatus(out: string): Record<string, string> {
+  const files: Record<string, string> = {}
+  const parts = out.split('\0')
+  for (let i = 0; i < parts.length; i++) {
+    const e = parts[i]!
+    if (e.length < 4) continue
+    const xy = e.slice(0, 2)
+    files[e.slice(3)] = xy
+    // the old path of a rename or copy follows it
+    if (/[RC]/.test(xy) && i + 1 < parts.length) files[parts[++i]!] = 'from'
+  }
+  return files
+}
+
+/**
+ * What the working tree holds, read by the hub's own git: every changed or
+ * untracked file, with its status and content hash, so a file the agent
+ * changed again is told apart from one already changed before. Undefined
+ * outside a repository or when git cannot say.
+ */
+export async function workState($: EngineInterface, repo: string): Promise<WorkState | undefined> {
+  const top = (await git($, repo, ['rev-parse', '--show-toplevel']))?.trim()
+  if (!top) return undefined
+  const out = await git($, top, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+  if (out === undefined) return undefined
+  const status = parseStatus(out)
+  const paths = Object.keys(status).filter(p => !p.includes('\n'))
+  const isPartial = paths.length > MAX_WORK_FILES
+  const listed = paths.slice(0, MAX_WORK_FILES)
+  const present = listed.filter(p => !/D/.test(status[p]!) && status[p] !== 'from' && !p.endsWith('/'))
+  let hashes: string[] = []
+  if (present.length) {
+    try {
+      const r = await $.process.run(['git', '-C', top, 'hash-object', '--stdin-paths'], { stdin: `${present.join('\n')}\n`, timeoutMs: 60_000 })
+      if (r.exitCode === 0) hashes = r.stdout.split(/\r?\n/)
+    } catch {
+      // statuses alone, below
+    }
+  }
+  const hashOf = new Map(present.map((p, i) => [p, hashes[i] ?? ''] as const))
+  const files: Record<string, string> = {}
+  for (const p of listed) files[p] = `${status[p]}:${hashOf.get(p) ?? ''}`
+  return { files, isPartial }
+}
+
+/** The files whose status or content differs between two readings, sorted. */
+export function changedFiles(before: WorkState, after: WorkState): string[] {
+  const out = new Set<string>()
+  for (const p of new Set([...Object.keys(before.files), ...Object.keys(after.files)])) {
+    if (before.files[p] !== after.files[p]) out.add(p)
+  }
+  return [...out].sort()
+}
+
+/** The changed files in words, for the answer: listed by the hub, never by the agent. */
+export function filesLine(before: WorkState | undefined, after: WorkState | undefined): string {
+  if (!before || !after) return 'The hub cannot list the changed files here (not a git repository): check the folder yourself.'
+  const files = changedFiles(before, after)
+  const partial = before.isPartial || after.isPartial ? ` The working tree has more than ${MAX_WORK_FILES} changed files, so this list may be short.` : ''
+  if (!files.length) return `No files changed (as read by the hub's own git).${partial}`
+  return `Files changed, as read by the hub's own git (review before committing):\n${files.map(f => `- ${f}`).join('\n')}${partial}`
+}

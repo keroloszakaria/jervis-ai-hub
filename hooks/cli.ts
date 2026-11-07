@@ -191,9 +191,24 @@ export const OPENCODE_READ_CONFIG = JSON.stringify({
   ],
 })
 
-/** OpenCode, a write the person allowed for one folder: nothing outside that folder. */
+/**
+ * OpenCode, a write the person allowed for one folder: its file tools only,
+ * inside that folder. A denial of outside folders alone is not enough: checked
+ * on 2.1.4, the model wrote outside through its shell, and through its
+ * `execute` tool, which moved the session to another folder. So everything is
+ * denied, then reading, searching, editing and writing are allowed, then every
+ * folder outside is denied. It runs no commands.
+ */
 export const OPENCODE_WRITE_CONFIG = JSON.stringify({
-  permissions: [{ action: 'external_directory', resource: '*', effect: 'deny' }],
+  permissions: [
+    { action: '*', resource: '*', effect: 'deny' },
+    { action: 'read', resource: '*', effect: 'allow' },
+    { action: 'glob', resource: '*', effect: 'allow' },
+    { action: 'grep', resource: '*', effect: 'allow' },
+    { action: 'edit', resource: '*', effect: 'allow' },
+    { action: 'write', resource: '*', effect: 'allow' },
+    { action: 'external_directory', resource: '*', effect: 'deny' },
+  ],
 })
 
 /** The argument vector for one request; prompts go on stdin wherever the CLI reads it. */

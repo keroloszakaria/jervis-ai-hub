@@ -162,6 +162,7 @@ async function startIn($: EngineInterface, a: StartArgs, id: string, full: strin
 
   if (r) {
     const f = a.cwd ? await folder($, a.cwd) : undefined
+    if (f?.error !== undefined) return { error: f.error }
     if (f && !(await allowProjectRead($, r.provider, f.real, f.shown))) {
       return { error: `The person declined to let ${provider(r.provider)?.label ?? r.provider} read the project: the job was not started.` }
     }

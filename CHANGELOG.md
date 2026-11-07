@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.10
+
+Security fixes, two of them found by the new check with the real CLIs:
+
+- **OpenCode writes stay in their folder:** a write through OpenCode now gets its file tools only (read, search, edit, write), inside the folder you approved. Checked with OpenCode 2.1.4, the old rule (deny outside folders) stopped the write tool only: the model wrote outside through its shell, and through its `execute` tool, which moved the session to another folder. 0.9.9's `SECURITY.md` said a write outside was denied; that held for the write tool alone. An OpenCode write now runs no commands.
+- **OpenCode runs in the folder the hub gives it:** OpenCode takes its folder from the `PWD` environment variable before the process's own folder. A `PWD` inherited from the shell Claude was started in could root a read-only request in that project instead of the empty sandbox. Every request and delegation now sets `PWD` to its own folder.
+- **The hub lists the changed files itself:** after a write or a delegation in a git repository, the hub reads the working tree with its own git (status and content hashes, before and after) and lists the files that changed. The relay's own list is no longer used. A file you had already changed is listed only if the run changed it again. Outside a repository the answer says the hub cannot list them.
+- **A delegation succeeds only with a clean exit:** the relay must report "completed" and exit with 0.
+- **A folder that cannot be resolved is refused:** a project folder that is missing, unreadable or a link that leads nowhere is refused before anything is asked or sent. Before, the hub fell back to the path as given.
+- **A check with the real CLIs:** `ci/real-cli.ts`, run by hand, sends real prompts to OpenCode and Antigravity the way the hub does and checks each isolation rule, with a control run beside each refusal so a model that never tried reads as inconclusive, not as a pass.
+
 ## 0.9.9
 
 Security fixes:

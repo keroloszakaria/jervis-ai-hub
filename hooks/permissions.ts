@@ -40,13 +40,14 @@ export function canonicalDir(os: OsName, dir: string): string {
 /**
  * Where a folder really is: a symlink or junction followed to its target, so a
  * grant belongs to the folder itself and a link to another folder is asked
- * about on its own. A path the file system cannot resolve stays as written.
+ * about on its own. Undefined when the file system cannot say: a folder that
+ * is missing, unreadable or leads nowhere.
  */
-export async function realDir($: EngineInterface, dir: string): Promise<string> {
+export async function realDir($: EngineInterface, dir: string): Promise<string | undefined> {
   try {
-    return (await $.fs.stat(dir, { resolve: true })).realPath ?? dir
+    return (await $.fs.stat(dir, { resolve: true })).realPath
   } catch {
-    return dir
+    return undefined
   }
 }
 
@@ -55,9 +56,11 @@ export async function realDir($: EngineInterface, dir: string): Promise<string> 
  * approved and where the CLI then runs, so a link changed after the question
  * changes nothing; `shown` is how the question names it.
  */
-export async function folder($: EngineInterface, dir: string): Promise<{ real: string; shown: string }> {
+export async function folder($: EngineInterface, dir: string): Promise<{ real: string; shown: string; error?: undefined } | { error: string }> {
   const os = await osName($)
   const real = await realDir($, dir)
+  // a folder the hub cannot place is not approved, and nothing runs in it
+  if (real === undefined) return { error: `${dir} could not be resolved to a real folder (missing, unreadable, or a link that leads nowhere), so nothing was sent.` }
   return { real, shown: canonicalDir(os, real) === canonicalDir(os, dir) ? dir : `${dir} (which leads to ${real})` }
 }
 

@@ -7,7 +7,7 @@ import type { EngineInterface } from 'claude-code'
 
 import { begin, finish, redact, redactKeys } from './activity'
 import { clean, dirOf, errText, exe, onPath } from './cli'
-import { guardEnv, LOCK_NOTE, refChanges, refusal, snapshot } from './gitguard'
+import { changedFiles, filesLine, guardEnv, LOCK_NOTE, refChanges, refusal, snapshot, workState } from './gitguard'
 import { resolveModel } from './models'
 import { provider } from './registry'
 import { readiness } from './requests'
@@ -119,6 +119,9 @@ export async function delegate(
     }
   }
 
+  // the working tree as it is before, so the files the run changed are the hub's own list
+  const workBefore = before.isRepo ? await workState($, repo) : undefined
+
   const token = runToken()
   await $.fs.write(briefPath, `${brief}${guard}\nRun: ${token}\n`)
   // the hub names the relay's artifact folder itself, so it reads the result from
@@ -135,6 +138,8 @@ export async function delegate(
     ...(cli ? { PATH: `${dirOf(cli)}${sep}${pathVar}`, ...(os === 'windows' ? { Path: `${dirOf(cli)}${sep}${pathVar}` } : {}) } : {}),
     // every git the relay and its agent start refuses ref changes and pushes
     ...(before.isRepo ? await guardEnv($, os) : {}),
+    // the repository, not a PWD inherited from the shell Claude started in (OpenCode reads PWD first)
+    PWD: repo,
   }
   const c = (await read($, config))[id]
   const pick = resolveModel((await read($, models))[id]?.models, c?.model, c?.effort)
@@ -176,15 +181,17 @@ export async function delegate(
     isMissing,
   })
   if (problem) result = undefined
-  const git = (result?.git ?? {}) as { touchedFiles?: unknown; commitViolation?: unknown }
-  const touched = Array.isArray(git.touchedFiles) ? git.touchedFiles.filter((f): f is string => typeof f === 'string') : undefined
+  const git = (result?.git ?? {}) as { commitViolation?: unknown }
   const final = typeof result?.finalMessage === 'string' ? redactKeys(result.finalMessage) : ''
 
   // the hub's own check, whatever the relay reports: did any ref change?
   const after = await snapshot($, repo)
   const changed = refChanges(before, after)
   if (git.commitViolation === true && !changed.length) changed.push('the relay reports that HEAD changed')
-  const files = touched?.length ? `\nFiles changed (review before committing):\n${touched.map(f => `- ${f}`).join('\n')}` : '\nNo files changed.'
+  // the files changed, read by the hub's own git: the relay's own list is never used
+  const workAfter = before.isRepo ? await workState($, repo) : undefined
+  const touched = workBefore && workAfter ? changedFiles(workBefore, workAfter) : undefined
+  const files = `\n${filesLine(workBefore, workAfter)}`
   if (changed.length) {
     const why = `git refs changed during the delegation: ${changed.join('; ')}`
     await finish($, actId, { state: 'error', ms, touchedFiles: touched, resultPreview: final, error: why })
@@ -204,18 +211,21 @@ export async function delegate(
   // no result that is provably this run's: never success, whatever the exit code
   if (problem) {
     const why = `the relay exited with ${code ?? 'no code'}, but ${problem}`
-    await finish($, actId, { state: 'error', ms, error: why })
+    await finish($, actId, { state: 'error', ms, touchedFiles: touched, error: why })
     return {
       isOk: false,
       status: 'unknown',
+      touchedFiles: touched,
       text: [
         `${p.label} relay result unknown after ${Math.round(ms / 1000)}s: ${why}.`,
         'Nothing it reported is trusted. Check the working tree yourself (git status, git diff) before you use any of it.',
+        files.trim(),
       ].join('\n'),
     }
   }
   const status = result!.status as string
-  const isOk = status === 'completed'
+  // a success needs both: the relay says completed and it exited cleanly
+  const isOk = status === 'completed' && code === 0
   await finish($, actId, {
     state: isOk ? 'ok' : 'error',
     ms,
@@ -228,6 +238,6 @@ export async function delegate(
     status,
     touchedFiles: touched,
     resultPath,
-    text: `${p.label} relay ${status} in ${Math.round(ms / 1000)}s.${files}\n\n${final}`.trim(),
+    text: `${p.label} relay ${status}${code === 0 ? '' : ` but exited with ${code ?? 'no code'}`} in ${Math.round(ms / 1000)}s.${files}\n\n${final}`.trim(),
   }
 }

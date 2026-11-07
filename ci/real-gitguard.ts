@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { guardEnv, refChanges, snapshot } from '../hooks/gitguard'
+import { changedFiles, guardEnv, refChanges, snapshot, workState } from '../hooks/gitguard'
 import { osName } from '../hooks/platform'
 
 // the few engine calls the guard makes, answered by this process
@@ -21,8 +21,8 @@ const $ = {
     exists: async (path: string) => existsSync(path),
   },
   process: {
-    run: async (argv: string[], opts?: { timeoutMs?: number }) => {
-      const r = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', timeout: opts?.timeoutMs ?? 20_000 })
+    run: async (argv: string[], opts?: { timeoutMs?: number; stdin?: string }) => {
+      const r = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', input: opts?.stdin, timeout: opts?.timeoutMs ?? 20_000 })
       if (r.error) throw r.error
       return { exitCode: r.status ?? -1, stdout: r.stdout, stderr: r.stderr }
     },
@@ -104,6 +104,22 @@ try {
   mkdirSync(sub, { recursive: true })
   const inner = await snapshot($, sub)
   check('a subfolder of the repository is read as the repository', inner.isRepo && !inner.failed, JSON.stringify(inner))
+
+  // the changed files the hub lists itself: a file already changed and left alone is not one
+  writeFileSync(join(repo, 'left-alone.txt'), 'mine\n')
+  writeFileSync(join(repo, 'a.txt'), 'two\n')
+  const w1 = await workState($, sub)
+  writeFileSync(join(repo, 'a.txt'), 'three\n')
+  mkdirSync(join(repo, 'new dir'))
+  writeFileSync(join(repo, 'new dir', 'n.txt'), 'n\n')
+  const w2 = await workState($, sub)
+  const files = w1 && w2 ? changedFiles(w1, w2) : []
+  check(
+    'the hub lists the files changed since it looked, from any subfolder, and nothing else',
+    JSON.stringify(files) === JSON.stringify(['a.txt', 'new dir/n.txt']),
+    JSON.stringify({ files, w1, w2 }),
+  )
+  check('a folder outside any repository has no working tree to read', (await workState($, plain)) === undefined)
 } finally {
   rmSync(root, { recursive: true, force: true })
 }
