@@ -7,7 +7,7 @@ import type { EngineInterface } from 'claude-code'
 import type { ActivityType, Mode, Task, Usage } from '../types'
 import { begin, finish, redact, redactKeys } from './activity'
 import { revealForRequest } from './auth'
-import { ERROR_LABEL, type ErrorKind, MAX_ARG_PROMPT, argvOf, classifyError, errText, exe, invocation, parse, parseOpencodeExport, sandboxDir, timeoutFor } from './cli'
+import { ERROR_LABEL, type ErrorKind, MAX_ARG_PROMPT, argvOf, classifyError, errText, exe, invocation, isolationProblem, parse, parseOpencodeExport, sandboxDir, timeoutFor } from './cli'
 import { resolveModel } from './models'
 import { sessionKey } from './permissions'
 import { provider } from './registry'
@@ -46,6 +46,8 @@ export type RequestArgs = {
   fallbackFrom?: string
   /** told the activity id once the request starts, so a background job can show and stop it */
   onStart?: (activityId: string) => void
+  /** variables for the CLI on top of its own (the git guard of a write) */
+  env?: Record<string, string>
 }
 
 /** Identical requests in flight share one run, so a double press or a retried tool call sends nothing twice. */
@@ -222,6 +224,9 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
   }
   const path = await exe($, p.kind)
   if (!path) return fail(`${p.label}: its CLI was not found.`)
+  // rules the hub cannot confirm for this version are no rules at all: refuse
+  const unconfined = await isolationProblem($, p.kind, path, a.mode)
+  if (unconfined) return fail(unconfined)
 
   const id = await begin($, {
     type: a.type,
@@ -247,7 +252,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     const inv = invocation(p.kind, path, a.prompt, a.mode, pick.cliModel, pick.effortArg)
     const { argv, stdin } = inv
     // the CLI's own limits for this mode (OpenCode's permissions), then the key
-    if (inv.env) env = { ...inv.env, ...env }
+    if (inv.env || a.env) env = { ...inv.env, ...a.env, ...env }
     const runDir = a.cwd ?? (await sandboxDir($))
     const timeoutMs = timeoutFor(a.type, a.mode)
     const r = await runStoppable($, id, { argv, input: stdin, env, cwd: runDir }, timeoutMs)

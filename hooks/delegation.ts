@@ -7,7 +7,7 @@ import type { EngineInterface } from 'claude-code'
 
 import { begin, finish, redact, redactKeys } from './activity'
 import { clean, dirOf, errText, exe, onPath } from './cli'
-import { guardEnv, refChanges, snapshot, undoHint } from './gitguard'
+import { guardEnv, LOCK_NOTE, refChanges, refusal, snapshot } from './gitguard'
 import { resolveModel } from './models'
 import { provider } from './registry'
 import { readiness } from './requests'
@@ -23,6 +23,43 @@ export type DelegationResult = {
   status?: string
   touchedFiles?: string[]
   resultPath?: string
+}
+
+/** A token for one run, written into its brief, so its result can be told from another run's. */
+function runToken(): string {
+  const b = new Uint8Array(12)
+  crypto.getRandomValues(b)
+  return [...b].map(x => x.toString(16).padStart(2, '0')).join('')
+}
+
+const samePath = (a: string, b: string) => a.replace(/\\/g, '/').toLowerCase() === b.replace(/\\/g, '/').toLowerCase()
+
+/**
+ * Why a result.json cannot be trusted as this run's, or undefined when it can:
+ * the relay's v1 schema, the agent that was asked, the file the relay named,
+ * and the brief the relay kept beside it carrying this run's token.
+ */
+export async function resultProblem(
+  $: EngineInterface,
+  result: Record<string, unknown> | undefined,
+  want: { agent: string; resultPath?: string; token: string },
+): Promise<string | undefined> {
+  if (!want.resultPath) return 'the relay named no result file'
+  if (!result) return 'its result file could not be read as JSON'
+  if (result.schema !== 'jervis-relay.result.v1') return `its result has an unknown schema (${String(result.schema)})`
+  if (result.agent !== want.agent) return `its result is from another agent (${String(result.agent)})`
+  if (typeof result.status !== 'string' || !result.status) return 'its result has no status'
+  const artifacts = (result.artifacts ?? {}) as { result?: unknown; brief?: unknown }
+  if (typeof artifacts.result !== 'string' || !samePath(artifacts.result, want.resultPath)) return 'its result names another result file'
+  if (typeof artifacts.brief !== 'string') return 'its result names no brief'
+  let brief = ''
+  try {
+    brief = await $.fs.read(artifacts.brief)
+  } catch {
+    return 'the brief beside its result could not be read'
+  }
+  if (!brief.includes(want.token)) return 'its result belongs to another run (the brief beside it is not this one)'
+  return undefined
 }
 
 async function skillScript($: EngineInterface, skill: string): Promise<string | undefined> {
@@ -68,8 +105,9 @@ export async function delegate(
   const briefPath = joinPath(os, await tempDir($), 'jervis-ai-hub', 'briefs', `brief-${stamp}.md`)
   const guard =
     '\n\nRules from the orchestrator: do not commit, do not push, keep changes inside this repository, and report what you changed. ' +
-    'Git refs are locked while you work: commit, branch, stash, merge, reset, fetch and push will fail. Leave every change uncommitted for review.\n'
-  await $.fs.write(briefPath, brief + guard)
+    `${LOCK_NOTE}\n`
+  const token = runToken()
+  await $.fs.write(briefPath, `${brief}${guard}\nRun: ${token}\n`)
 
   // the refs as they are before anything runs, read by the hub's own git
   const before = await snapshot($, repo)
@@ -115,6 +153,8 @@ export async function delegate(
       // reported below without it
     }
   }
+  const problem = await resultProblem($, result, { agent: p.relaySkill.replace(/-delegate$/, ''), resultPath, token })
+  if (problem) result = undefined
   const git = (result?.git ?? {}) as { touchedFiles?: unknown; commitViolation?: unknown }
   const touched = Array.isArray(git.touchedFiles) ? git.touchedFiles.filter((f): f is string => typeof f === 'string') : undefined
   const final = typeof result?.finalMessage === 'string' ? redactKeys(result.finalMessage) : ''
@@ -125,7 +165,6 @@ export async function delegate(
   if (git.commitViolation === true && !changed.length) changed.push('the relay reports that HEAD changed')
   const files = touched?.length ? `\nFiles changed (review before committing):\n${touched.map(f => `- ${f}`).join('\n')}` : '\nNo files changed.'
   if (changed.length) {
-    const undo = undoHint(before, after)
     const why = `git refs changed during the delegation: ${changed.join('; ')}`
     await finish($, actId, { state: 'error', ms, touchedFiles: touched, resultPreview: final, error: why })
     return {
@@ -134,16 +173,27 @@ export async function delegate(
       touchedFiles: touched,
       resultPath,
       text: [
-        `${p.label} relay ran for ${Math.round(ms / 1000)}s, but git refs changed, which a delegation must never do. The hub undid nothing.`,
-        ...changed.map(c => `- ${c}`),
-        ...(undo ? [undo] : []),
-        'A push cannot be undone from here: check the remote yourself.',
+        `${p.label} relay ran for ${Math.round(ms / 1000)}s, but git refs changed, which a delegation must never do.`,
+        ...refusal(before, after, changed),
         files.trim(),
       ].join('\n'),
     }
   }
 
-  const status = typeof result?.status === 'string' ? result.status : code === 0 ? 'completed' : 'failed'
+  // no result that is provably this run's: never success, whatever the exit code
+  if (problem) {
+    const why = `the relay exited with ${code ?? 'no code'}, but ${problem}`
+    await finish($, actId, { state: 'error', ms, error: why })
+    return {
+      isOk: false,
+      status: 'unknown',
+      text: [
+        `${p.label} relay result unknown after ${Math.round(ms / 1000)}s: ${why}.`,
+        'Nothing it reported is trusted. Check the working tree yourself (git status, git diff) before you use any of it.',
+      ].join('\n'),
+    }
+  }
+  const status = result!.status as string
   const isOk = status === 'completed'
   await finish($, actId, {
     state: isOk ? 'ok' : 'error',

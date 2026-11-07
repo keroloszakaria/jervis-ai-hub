@@ -6,7 +6,9 @@ import type { EngineInterface } from 'claude-code'
 import type { Level, Task } from '../types'
 import { errText, timeoutFor } from './cli'
 import { delegate } from './delegation'
+import { guardEnv, LOCK_NOTE, refChanges, refusal, snapshot } from './gitguard'
 import { allowProjectRead, allowWrite } from './permissions'
+import { osName } from './platform'
 import { provider } from './registry'
 import { compare, readiness, runRequest, usageLine } from './requests'
 import type { RequestResult } from './requests'
@@ -58,7 +60,21 @@ export async function askTool(
     const dir = a.cwd ?? (await read($, cwd))
     if (!dir) return { isOk: false, text: 'Write mode needs a project folder (cwd).' }
     if (!(await allowWrite($, providerId, dir, 'ask_ai write mode'))) return { isOk: false, text: 'The person declined: no files were changed.' }
-    const r = await runRequest($, { providerId, model, effort, prompt: a.prompt, mode: 'write', cwd: dir, type: 'ask', task: a.task })
+    // the same git guard as a delegation: refs locked while it writes, and read before and after
+    const before = await snapshot($, dir)
+    const env = before.isRepo ? await guardEnv($, await osName($)) : undefined
+    const prompt = before.isRepo ? `${a.prompt}\n\nRules from the orchestrator: do not commit or push. ${LOCK_NOTE}` : a.prompt
+    const r = await runRequest($, { providerId, model, effort, prompt, mode: 'write', cwd: dir, type: 'ask', task: a.task, env })
+    if (before.isRepo) {
+      const after = await snapshot($, dir)
+      const changed = refChanges(before, after)
+      if (changed.length) {
+        return {
+          isOk: false,
+          text: [`${header(r)}\nRefused: git refs changed during the write, which it must never do.`, ...refusal(before, after, changed)].join('\n'),
+        }
+      }
+    }
     return { isOk: r.isOk, text: `${header(r)}\n${r.text}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}` }
   }
 

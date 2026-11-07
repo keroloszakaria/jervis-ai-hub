@@ -82,6 +82,19 @@ export function refChanges(before: RefSnapshot, after: RefSnapshot): string[] {
   return out
 }
 
+/** What the agent is told while refs are locked. */
+export const LOCK_NOTE =
+  'Git refs are locked while you work: commit, branch, stash, merge, reset, fetch and push will fail. Leave every change uncommitted for review.'
+
+/**
+ * The lines that refuse a run whose refs changed: each change, how to keep the
+ * work as uncommitted changes, and that a push cannot be seen from here.
+ */
+export function refusal(before: RefSnapshot, after: RefSnapshot, changed: string[]): string[] {
+  const undo = undoHint(before, after)
+  return [...changed.map(c => `- ${c}`), ...(undo ? [undo] : []), 'The hub undid nothing. A push cannot be undone from here: check the remote yourself.']
+}
+
 /** How to put the branch back, keeping the agent's work as uncommitted changes. */
 export function undoHint(before: RefSnapshot, after: RefSnapshot): string | undefined {
   if (!before.head || before.head === after.head || before.branch !== after.branch) return undefined

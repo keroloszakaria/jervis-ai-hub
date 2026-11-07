@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.7
+
+Security fixes:
+
+- **`ask_ai` writes get the git guard:** a write through `ask_ai` (`mode: "write"`) now runs like a delegation. Git refs are locked while it writes, pushes go nowhere, and the hub reads every ref before and after. If any changed, the answer is refused with what changed and how to undo it. Before, only `delegate_ai` had this.
+- **A delegation needs a result of its own:** the relay's `result.json` must have the relay's v1 schema, come from the agent that was asked, be the file the relay named, and sit beside a brief carrying this run's random token. A missing, unreadable or foreign result now reads "unknown", never "completed", whatever the exit code, and nothing it reports is passed on.
+- **CLI versions are checked:** OpenCode requests run only on OpenCode 2.x, whose permission format the hub writes; 1.x reads another format and would ignore the rules. Read-only Antigravity requests run only on 1.5 or a later 1.x. On any other version, or one whose version cannot be read, the request is refused and nothing is sent.
+- `SECURITY.md` now says that writes come from `ask_ai` too, and names more limits: the git guard is not an operating-system boundary, the checks with real CLIs were made on Windows only, and folder approvals do not resolve symlinks.
+
 ## 0.9.6
 
 Fixes for background jobs:

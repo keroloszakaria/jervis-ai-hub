@@ -327,3 +327,47 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
   if (!text && !error) error = 'the CLI returned no answer'
   return { isOk: !error && text.length > 0, text, usage, error, sessionId }
 }
+
+/** The first x.y.z in a CLI's --version output ("opencode v2.1.4", "1.5.3"). */
+export function parseVersion(text: string): [number, number, number] | undefined {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(text)
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined
+}
+
+/**
+ * The CLI versions whose isolation rules the hub has checked on a real run.
+ * OpenCode reads `permissions` (an array) from 2.0 on; 1.x reads `permission`
+ * and would ignore the hub's rules, so its requests would run unconfined.
+ * Antigravity's --settings deny rules were checked on 1.5.
+ */
+const TESTED: Partial<Record<Kind, { label: string; modes: Mode[]; isOk: (v: [number, number, number]) => boolean; range: string }>> = {
+  'opencode-free': { label: 'OpenCode', modes: ['read', 'write'], isOk: v => v[0] === 2, range: '2.x' },
+  'opencode-key': { label: 'OpenCode', modes: ['read', 'write'], isOk: v => v[0] === 2, range: '2.x' },
+  agy: { label: 'Antigravity', modes: ['read'], isOk: v => v[0] === 1 && v[1] >= 5, range: '1.5 or a later 1.x' },
+}
+
+const versions = new Map<string, string>()
+
+/**
+ * Why a request on this CLI may not run, when the hub cannot confirm its
+ * isolation rules hold for the installed version; undefined when it can (or
+ * the CLI keeps its own sandbox, as Codex does).
+ */
+export async function isolationProblem($: EngineInterface, kind: Kind, path: string, mode: Mode): Promise<string | undefined> {
+  const t = TESTED[kind]
+  if (!t || !t.modes.includes(mode)) return undefined
+  let out = versions.get(path)
+  if (out === undefined) {
+    try {
+      const r = await $.process.run([...argvOf(path), '--version'], { timeoutMs: 20_000 })
+      out = clean(r.stdout || r.stderr).split('\n')[0] ?? ''
+    } catch {
+      out = ''
+    }
+    if (out) versions.set(path, out)
+  }
+  const v = parseVersion(out)
+  if (v && t.isOk(v)) return undefined
+  const what = mode === 'read' ? 'read-only' : 'write'
+  return `${t.label} ${v ? v.join('.') : '(its version could not be read)'} is not a version whose ${what} limits the hub has checked (${t.range}), so nothing was sent. Install ${t.label} ${t.range}.`
+}

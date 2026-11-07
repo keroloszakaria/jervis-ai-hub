@@ -5,7 +5,7 @@ import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
 import { redactKeys, snipWords } from '../hooks/activity'
 import { parseRefs, refChanges, undoHint } from '../hooks/gitguard'
-import { AGY_READ_SETTINGS } from '../hooks/cli'
+import { AGY_READ_SETTINGS, parseVersion } from '../hooks/cli'
 import { duration, size } from '../hooks/requests'
 import { effortForLevel, levelTag, rate } from '../hooks/levels'
 import type { ModelInfo } from '../types'
@@ -78,6 +78,10 @@ type World = {
   /** the repository's refs as git reports them; the relay run switches to `gitAfter` */
   git?: { head: string; branch?: string; refs: Record<string, string> }
   gitAfter?: { head: string; branch?: string; refs: Record<string, string> }
+  /** what the relay leaves: a result for this run (default), none, one for another brief, or an unknown schema */
+  relay?: 'ok' | 'none' | 'foreign' | 'old-schema'
+  /** what agy and opencode answer to --version (1.5.3 and 2.1.4 when absent) */
+  versions?: { agy?: string; opencode?: string }
 }
 
 /** reads a PowerShell -EncodedCommand back into its script (UTF-16LE, base64) */
@@ -229,8 +233,31 @@ function respond(w: World, run: Run) {
       if (sub.startsWith('for-each-ref')) return ok(Object.entries(g.refs).map(([r, s]) => `${s} ${r}`).join('\n'))
     }
     // the relay: from here on git reports what the agent left
-    if (e.argv.includes('--brief') && w.gitAfter) w.git = w.gitAfter
+    if ((e.argv.includes('--brief') || e.argv[1] === 'exec') && w.gitAfter) w.git = w.gitAfter
+    // the relay copies the brief beside its result.json and names that file on stderr
+    if (e.argv.includes('--brief') && w.relay !== 'none') {
+      const brief = w.written?.[winPath(e.argv[e.argv.indexOf('--brief') + 1] ?? '')] ?? ''
+      const root = 'C:\\Temp\\relay\\run-1'
+      const files = (w.files ??= {})
+      files[`${root}\\brief.txt`] = w.relay === 'foreign' ? 'an older brief' : brief
+      files[`${root}\\result.json`] = JSON.stringify({
+        schema: w.relay === 'old-schema' ? 'jervis-relay.result.v0' : 'jervis-relay.result.v1',
+        agent: 'codex',
+        status: 'completed',
+        exitCode: 0,
+        finalMessage: 'done',
+        artifacts: { root, brief: `${root}\\brief.txt`, result: `${root}\\result.json` },
+        git: { touchedFiles: ['src/a.ts'], commitViolation: false },
+      })
+      return ok('done\n', `Jervis Relay: completed; result=${root}\\result.json\n`)
+    }
     if (e.argv[0] === 'where' || e.argv[0] === 'which') return ok('', 'not found', 1)
+    // each CLI's --version, in its own format
+    if (e.argv[e.argv.length - 1] === '--version') {
+      if (a.includes('agy')) return ok(`${w.versions?.agy ?? '1.5.3'}\n`)
+      if (a.includes('opencode')) return ok(`opencode v${w.versions?.opencode ?? '2.1.4'}\n`)
+      return ok('codex-cli 0.130.0\n')
+    }
     if (e.argv[0] === 'uname') return ok('Darwin\n')
     if (e.argv[0] === 'osascript') return ok(`${SECRET}\n`)
     if (e.argv[0] === 'security') return e.argv[1] === 'find-generic-password' ? ok(`${SECRET}\n`) : ok('')
@@ -1321,6 +1348,71 @@ test('outside a git repository a delegation runs without the guard', async ($, o
   expect(w.ran.find(x => x.argv.includes('--brief'))?.env?.GIT_CONFIG_COUNT).toBeUndefined()
 })
 
+for (const [relay, why] of [
+  ['none', 'named no result file'],
+  ['foreign', 'belongs to another run'],
+  ['old-schema', 'unknown schema'],
+] as const) {
+  test(`a relay that exits 0 without a result of this run is not a success (${relay})`, async ($, on) => {
+    const w = world(LEGACY())
+    DELEGATE(w)
+    w.relay = relay
+    engine(on, w)
+    await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+    await settle()
+    const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix it', repo: 'C:\\proj' } as never))
+    expect(r).toContain('relay result unknown')
+    expect(r).toContain(why)
+    expect(r).not.toContain('relay completed')
+    // nothing from an untrusted result is passed on
+    expect(r).not.toContain('src/a.ts')
+  })
+}
+
+test('a relay result of this run is read: its files and status', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix it', repo: 'C:\\proj' } as never))
+  expect(r).toContain('relay completed')
+  expect(r).toContain('src/a.ts')
+  // the brief carries the run's token
+  const brief = Object.entries(w.written ?? {}).find(([k]) => k.includes('briefs'))?.[1] ?? ''
+  expect(brief).toMatch(/\nRun: [0-9a-f]{24}\n/)
+})
+
+const WRITE = { tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', mode: 'write', cwd: 'C:\\proj', prompt: 'fix the bug' }
+
+test('an ask_ai write runs with git refs locked, like a delegation', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(r).not.toContain('Refused')
+  const run = w.ran.find(x => x.argv[1] === 'exec')!
+  expect(run.env?.GIT_CONFIG_KEY_0).toBe('core.hooksPath')
+  expect(run.env?.GIT_CONFIG_KEY_1).toBe('url.jervis-blocked://.pushInsteadOf')
+  expect(run.stdin).toContain('Git refs are locked')
+})
+
+test('an ask_ai write that commits anyway is refused, with how to undo it', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.gitAfter = { head: B, branch: 'main', refs: { 'refs/heads/main': B, 'refs/remotes/origin/main': A } }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(r).toContain('Refused: git refs changed')
+  expect(r).toContain('HEAD moved from aaaaaaa to bbbbbbb')
+  expect(r).toContain(`git reset --soft ${A}`)
+  expect(r).toContain('The hub undid nothing')
+})
+
 test('ref changes are named one by one', () => {
   const before = { isRepo: true, head: A, branch: 'main', refs: parseRefs([`${A} refs/heads/main`, `${A} refs/tags/v1`, ''].join('\n')) }
   expect(refChanges(before, before)).toEqual([])
@@ -1373,6 +1465,43 @@ test('a read-only OpenCode request may only read, glob and search, inside its fo
   const write = w.ran.filter(x => x.argv.includes('--auto')).pop()!
   const wrules = (JSON.parse(write.env?.OPENCODE_CONFIG_CONTENT ?? '{}') as { permissions: { action: string; effect: string }[] }).permissions
   expect(wrules).toEqual([{ action: 'external_directory', resource: '*', effect: 'deny' }])
+})
+
+for (const [version, what] of [
+  ['1.9.0', '1.9.0'],
+  ['3.0.0', '3.0.0'],
+  ['dev', '(its version could not be read)'],
+] as const) {
+  test(`OpenCode ${version} runs nothing: its read-only rules are not ones the hub checked`, async ($, on) => {
+    const w = world(LEGACY())
+    w.versions = { opencode: version }
+    engine(on, w)
+    await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+    await settle()
+    const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'deepseek', prompt: 'q' } as never))
+    expect(r).toContain(`OpenCode ${what} is not a version whose read-only limits the hub has checked (2.x)`)
+    expect(r).toContain('nothing was sent')
+    // the prompt never reached a CLI
+    expect(w.ran.some(x => x.argv.includes('run'))).toBe(false)
+  })
+}
+
+test('Antigravity before 1.5 runs no read-only request', async ($, on) => {
+  const legacy = LEGACY()
+  const w = world({ ...legacy, 'config-v2': { ...legacy['config-v2'], antigravity: { isConnected: true, isEnabled: true, model: 'gem-pro-high' } } })
+  w.versions = { agy: '1.4.9' }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(60)
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'antigravity', prompt: 'q' } as never))
+  expect(r).toContain('Antigravity 1.4.9 is not a version whose read-only limits the hub has checked')
+  expect(w.ran.some(x => x.argv.some(s => s === '-p=q'))).toBe(false)
+})
+
+test('CLI versions are read from their own --version formats', () => {
+  expect(parseVersion('opencode v2.1.4')).toEqual([2, 1, 4])
+  expect(parseVersion('1.5.3')).toEqual([1, 5, 3])
+  expect(parseVersion('dev build')).toBeUndefined()
 })
 
 // background jobs: one count for jobs started together, results that belong to one session
