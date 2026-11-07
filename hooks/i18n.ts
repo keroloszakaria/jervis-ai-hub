@@ -192,6 +192,9 @@ const AR: Record<string, string> = {
   'writes and delegations never fall back or retry.': 'الكتابة والتفويض عمرهم ما بيتحولوا أو يتعادوا.',
   'at most': 'بحد أقصى',
   'ask before a provider reads project files': 'اسأل قبل ما provider يقرا ملفات المشروع',
+  'allow writes not held to the folder (antigravity)': 'اسمح بكتابة مش محصورة في المجلد (Antigravity)',
+  "antigravity's writes and delegations can change any file you can. codex and opencode writes stay in the folder you approve.":
+    'كتابة Antigravity والتفويض بتاعه يقدروا يغيّروا أي ملف إنت تقدر تغيّره. كتابة Codex وOpenCode بتفضل جوه المجلد اللي وافقت عليه.',
   'keep redacted prompt previews': 'احتفظ بمعاينات للـ prompts متخبّي منها الأسرار',
   'test right after connecting (sends one real prompt)': 'اختبر على طول بعد التوصيل (بيبعت طلب حقيقي واحد)',
   'alert me near a provider’s limit': 'نبّهني لما provider يقرب من حده',

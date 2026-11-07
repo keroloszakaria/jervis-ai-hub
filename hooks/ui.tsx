@@ -1472,6 +1472,13 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           onPress={() => void saveSettings($, s => ({ ...s, confirmProjectAccess: !s.confirmProjectAccess }))}
         />
         <Toggle
+          id="unbounded-writes"
+          on={st.allowUnboundedWrites === true}
+          label="Allow writes not held to the folder (Antigravity)"
+          hint="Antigravity's writes and delegations can change any file you can. Codex and OpenCode writes stay in the folder you approve."
+          onPress={() => void saveSettings($, s => ({ ...s, allowUnboundedWrites: s.allowUnboundedWrites !== true }))}
+        />
+        <Toggle
           id="previews"
           on={st.recordPreviews}
           label="Keep redacted prompt previews"

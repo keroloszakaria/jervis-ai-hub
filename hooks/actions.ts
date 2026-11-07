@@ -8,7 +8,7 @@ import { finish } from './activity'
 import { errText, timeoutFor } from './cli'
 import { delegate } from './delegation'
 import { filesLine, guardEnv, LOCK_NOTE, refChanges, refusal, snapshot, workState } from './gitguard'
-import { allowProjectRead, allowWrite, folder } from './permissions'
+import { allowProjectRead, allowWrite, folder, unboundedRefusal } from './permissions'
 import { osName } from './platform'
 import { provider } from './registry'
 import { compare, readiness, runRequest, usageLine } from './requests'
@@ -60,6 +60,8 @@ export async function askTool(
   if (a.mode === 'write') {
     const named = a.cwd ?? (await read($, cwd))
     if (!named) return { isOk: false, text: 'Write mode needs a project folder (cwd).' }
+    const unbounded = await unboundedRefusal($, providerId)
+    if (unbounded) return { isOk: false, text: `Refused: ${unbounded}` }
     // resolved once: the folder approved is the folder written
     const f = await folder($, named)
     if (f.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
@@ -170,6 +172,8 @@ export async function compareTool($: EngineInterface, prompt: string, providers?
 export async function delegateTool($: EngineInterface, providerId: string, brief: string, repo?: string): Promise<ToolAnswer> {
   const named = repo ?? (await read($, cwd))
   if (!named) return { isOk: false, text: 'Delegation needs a repository folder.' }
+  const unbounded = await unboundedRefusal($, providerId)
+  if (unbounded) return { isOk: false, text: `Refused: ${unbounded}` }
   const f = await folder($, named)
   if (f.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
   if (!(await allowWrite($, providerId, f.real, 'Jervis Relay delegation', f.shown))) return { isOk: false, text: 'The person declined: nothing was delegated.' }

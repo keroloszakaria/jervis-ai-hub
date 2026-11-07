@@ -133,6 +133,8 @@ export type Settings = {
   fallback: boolean
   maxFallbacks: number
   confirmProjectAccess: boolean
+  /** writes on a CLI that is not held to the folder (Antigravity); off when absent */
+  allowUnboundedWrites?: boolean
   recordPreviews: boolean
   verifyOnConnect: boolean
   retentionCount: number

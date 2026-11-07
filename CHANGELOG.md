@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.11
+
+Security fixes and a stricter check with the real CLIs:
+
+- **Antigravity writes are off unless you allow them:** Antigravity's writes and delegations are not held to the folder, so they are now refused before anything is asked or sent. Turn on "Allow writes not held to the folder (Antigravity)" in Settings → Privacy to allow them; the question then says it can change any file you can.
+- **`ci/real-cli.ts` is a gate:** a refusal check passes only when the effect is absent, the CLI's own output shows the refusal, and its control run worked. The script exits 1 on a failed check, 3 on any inconclusive one or a missing CLI, 0 only when all passed, and writes an evidence file for each run. It now checks Codex too, and the "outside" folder is under your home, not the temp folder.
+- **Codex reads are not held to the folder:** the new Codex check found that a read-only Codex request can read a file outside its folder. Its sandbox stops writes, not reads. The hub cannot limit this yet; `SECURITY.md` now says so where it describes what leaves your machine, and the check stays failed.
+- **The changed-file list says whose changes it holds:** every change made while the run went on, by anyone.
+
 ## 0.9.10
 
 Security fixes, two of them found by the new check with the real CLIs:

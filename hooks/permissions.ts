@@ -89,9 +89,26 @@ export async function allowProjectRead($: EngineInterface, providerId: string, d
   return answer === 'Allow once' || answer === 'Allow this session'
 }
 
+/**
+ * Whether a provider's writes are held to the folder: Codex by its own
+ * `workspace-write` sandbox, OpenCode by the hub's rules (file tools only,
+ * inside the folder). Antigravity's accept-edits mode and its relay are not.
+ */
+export function writeIsBounded(providerId: string): boolean {
+  return provider(providerId)?.kind !== 'agy'
+}
+
+/** Why a write on this provider is refused, or undefined when it may be asked about. */
+export async function unboundedRefusal($: EngineInterface, providerId: string): Promise<string | undefined> {
+  if (writeIsBounded(providerId) || (await read($, settings)).allowUnboundedWrites) return undefined
+  const label = provider(providerId)?.label ?? providerId
+  return `${label} writes are not held to the folder: it could change any file you can. They are off; turn on "Allow writes not held to the folder (Antigravity)" in Jervis AI Hub → Settings → Privacy to allow them. Nothing was sent.`
+}
+
 export async function allowWrite($: EngineInterface, providerId: string, dir: string, how: string, shown = dir): Promise<boolean> {
   const label = provider(providerId)?.label ?? providerId
-  const answer = await confirm($, `Let ${label} change files in ${shown} (${how})? Nothing is committed.`, ['Allow', 'Deny'])
+  const where = writeIsBounded(providerId) ? `in ${shown}` : `starting in ${shown}. It is not held to this folder and can change any file you can`
+  const answer = await confirm($, `Let ${label} change files ${where} (${how})? Nothing is committed.`, ['Allow', 'Deny'])
   return answer === 'Allow'
 }
 

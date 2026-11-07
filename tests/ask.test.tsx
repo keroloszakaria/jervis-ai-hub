@@ -1522,6 +1522,8 @@ test('an ask_ai write lists the files the hub saw change', async ($, on) => {
   const r = JSON.stringify(await $.tool.call(WRITE as never))
   expect(r).toContain("Files changed, as read by the hub's own git")
   expect(r).toContain('- src/x.ts')
+  // the list is the working tree's, not the agent's alone
+  expect(r).toContain('by anyone: one you or another program made then is listed too')
 })
 
 test('an ask_ai write that commits anyway is refused, with how to undo it', async ($, on) => {
@@ -1654,12 +1656,56 @@ test('a read-only Antigravity request runs with write, commands, MCP and the web
   const deny = (JSON.parse(read.argv[at + 1]!) as { permissions: { deny: string[] } }).permissions.deny
   expect(deny).toEqual(['write_file(*)', 'command(*)', 'mcp(*)', 'read_url(*)', 'execute_url(*)'])
   expect(read.argv[at + 1]).toBe(AGY_READ_SETTINGS)
-  // a write the person allowed keeps Antigravity's own edit mode, without the read-only settings
-  w.answer = 'Allow'
-  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'antigravity', prompt: 'w', mode: 'write' } as never)
+})
+
+test('Antigravity writes are off until the person allows writes not held to the folder', async ($, on) => {
+  const legacy = LEGACY()
+  const agy = { ...legacy['config-v2'], antigravity: { isConnected: true, isEnabled: true, model: 'gem-pro-high' } }
+  const w = world({ ...legacy, 'config-v2': agy })
+  DELEGATE(w)
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(60)
+  const runs = w.ran.length
+  const asked = w.asked.length
+  for (const call of [
+    { tool: 'mcp__ai-subscriptions__ask_ai', provider: 'antigravity', prompt: 'w', mode: 'write', cwd: 'C:\\proj' },
+    { tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'b', repo: 'C:\\proj' },
+  ]) {
+    const r = JSON.stringify(await $.tool.call(call as never))
+    expect(r).toContain('Refused: Antigravity writes are not held to the folder')
+    expect(r).toContain('Settings → Privacy')
+  }
+  // nothing was asked, and no CLI or relay ran
+  expect(w.asked.length).toBe(asked)
+  expect(w.ran.slice(runs).some(x => x.argv.includes('--output-format') || x.argv.includes('--brief'))).toBe(false)
+})
+
+test('with writes not held to the folder allowed, the question says so, and Antigravity keeps its own edit mode', async ($, on) => {
+  const legacy = LEGACY()
+  const agy = { ...legacy['config-v2'], antigravity: { isConnected: true, isEnabled: true, model: 'gem-pro-high' } }
+  const w = world({ ...legacy, 'config-v2': agy, 'hub-settings-v1': { ...DEFAULT_SETTINGS, allowUnboundedWrites: true } })
+  DELEGATE(w)
+  w.git = undefined
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(60)
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'antigravity', prompt: 'w', mode: 'write', cwd: 'C:\\proj' } as never)
+  expect(w.asked.at(-1)).toContain('It is not held to this folder and can change any file you can')
   const write = w.ran.filter(x => x.argv.includes('--output-format')).pop()!
   expect(write.argv).toContain('accept-edits')
   expect(write.argv).not.toContain('--settings')
+})
+
+test('a Codex write is asked about with its folder alone', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call(WRITE as never)
+  expect(w.asked.at(-1)).toContain('change files in C:\\proj')
+  expect(w.asked.at(-1)).not.toContain('not held')
 })
 
 test('a read-only OpenCode request may only read, glob and search, inside its folder; a write stays in its folder', async ($, on) => {

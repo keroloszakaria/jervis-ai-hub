@@ -242,5 +242,7 @@ export function filesLine(before: WorkState | undefined, after: WorkState | unde
   const files = changedFiles(before, after)
   const partial = before.isPartial || after.isPartial ? ` The working tree has more than ${MAX_WORK_FILES} changed files, so this list may be short.` : ''
   if (!files.length) return `No files changed (as read by the hub's own git).${partial}`
-  return `Files changed, as read by the hub's own git (review before committing):\n${files.map(f => `- ${f}`).join('\n')}${partial}`
+  // before and after: what anyone changed in between is in the list, not the agent's work alone
+  const who = 'It holds every change made while the run was going, by anyone: one you or another program made then is listed too.'
+  return `Files changed, as read by the hub's own git (review before committing):\n${files.map(f => `- ${f}`).join('\n')}\n${who}${partial}`
 }
