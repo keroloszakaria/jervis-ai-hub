@@ -1146,6 +1146,34 @@ test('a request refused for its sign-in marks the provider signed out, and the r
   expect(routed).not.toContain('[chatgpt')
 })
 
+// the routing order: a rule, then the default provider, then the smart pick (or the first ready provider)
+const ORDER: { name: string; settings: Record<string, unknown>; off?: string; goes: string; why: string }[] = [
+  { name: 'smart on, default DeepSeek', settings: { defaultProvider: 'deepseek' }, goes: 'deepseek', why: 'default provider' },
+  { name: 'smart on, default ChatGPT', settings: { defaultProvider: 'chatgpt' }, goes: 'chatgpt', why: 'default provider' },
+  { name: 'smart on, default not ready', settings: { defaultProvider: 'deepseek' }, off: 'deepseek', goes: 'chatgpt', why: 'default provider DeepSeek skipped' },
+  { name: 'smart off, default DeepSeek', settings: { defaultProvider: 'deepseek', smartRouting: false }, goes: 'deepseek', why: 'default provider' },
+  { name: 'smart off, default not ready', settings: { defaultProvider: 'deepseek', smartRouting: false }, off: 'deepseek', goes: 'chatgpt', why: 'first ready provider (skipped default provider DeepSeek: not ready)' },
+  { name: 'a rule beats the default', settings: { defaultProvider: 'deepseek', routes: { general: { provider: 'chatgpt' } } }, goes: 'chatgpt', why: 'routing rule for general' },
+  { name: 'a rule not ready is named', settings: { defaultProvider: 'chatgpt', routes: { general: { provider: 'deepseek' } } }, off: 'deepseek', goes: 'chatgpt', why: 'routing rule for general: DeepSeek not ready' },
+]
+
+for (const c of ORDER) {
+  test(`routing order: ${c.name} -> ${c.goes}; the preview and the request agree`, async ($, on) => {
+    const base = LEGACY()
+    const cfg = c.off ? { ...base['config-v2'], [c.off]: { ...(base['config-v2'] as Record<string, object>)[c.off], isEnabled: false } } : base['config-v2']
+    const w = world({ ...base, 'config-v2': cfg, 'hub-settings-v1': { ...DEFAULT_SETTINGS, ...c.settings } })
+    engine(on, w)
+    await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+    await settle()
+    const pre = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'general', prompt: 'q', preview: true } as never))
+    const why = /Why: ([^\\]*)/.exec(pre)?.[1] ?? ''
+    expect(why).toContain(c.why)
+    const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'general', prompt: 'q' } as never))
+    expect(r).toContain(`[${c.goes}`)
+    expect(r).toContain(`(${why})`)
+  })
+}
+
 test('a CLI installed by npm is run through the script its shim names, never through a shell', async ($, on) => {
   const w = world(LEGACY())
   w.shims = { opencode: 'C:\\npm\\opencode.cmd' }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.8
+
+A routing order you can see:
+
+- **The default provider comes before the smart pick:** with Smart routing on, a request with no provider named and no rule for its task goes to your default provider, with that provider's best model for the task and level. Before, Smart routing passed over the default provider. With no default provider set, nothing changes.
+- **What was passed over is named:** "routing rule for code: DeepSeek not ready", or "default provider DeepSeek skipped: ..." in the reason.
+- **The Settings tab shows the same pick** the request would make, default provider included.
+- **Tests:** a table of seven cases (rule, default and smart on and off, a provider not ready). In each, the preview and the request go to the same provider for the same reason.
+
 ## 0.10.7
 
 A sign-in is checked before it is used:

@@ -18,8 +18,7 @@ import { CAPABILITIES, EFFORT_LABEL, capabilityList, favKey, hasCapability, isMo
 import { AUTH_LABEL, PROVIDERS, TASKS, provider } from './registry'
 import type { ProviderEntry } from './registry'
 import { duration, runningIds, size, stopRequest, usageLine, usd } from './requests'
-import { activeRoutes } from './routing'
-import { smartPick } from './smart'
+import { activeRoutes, smartOrDefault } from './routing'
 import type { SmartPick } from './smart'
 import { saveConfig, saveFavorites, saveSettings, setUi, DEFAULT_SETTINGS, DEFAULT_UI } from './state'
 
@@ -1265,7 +1264,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
   const isSmart = st.smartRouting !== false
   const routeOptions = [{ value: 'auto', label: isSmart ? 'Smart pick' : 'Automatic' }]
   const picks: Partial<Record<Task, SmartPick | { reason: string }>> = {}
-  if (isSmart) for (const t of TASKS) if (!routes[t.id]) picks[t.id] = await smartPick($, t.id)
+  if (isSmart) for (const t of TASKS) if (!routes[t.id]) picks[t.id] = await smartOrDefault($, t.id)
   for (const p of connected) routeOptions.push({ value: `${p.id}::`, label: p.label })
   for (const f of favs) {
     const [pid = '', mid = ''] = f.split('::')
@@ -1347,7 +1346,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
 
       <Heading title="Routing rules" />
       <Box key="routing-card" {...CARD}>
-        <Hint text={snip(profile === 'global' ? (isSmart ? 'Fix a task to one provider or model; left on Smart pick, the hub chooses.' : 'Who answers each kind of request when no provider is named.') : `Rules for this project: ${profile}`, IN * 2)} />
+        <Hint text={snip(profile === 'global' ? (isSmart ? 'Fix a task to one provider or model. Otherwise, a default provider answers; with none, the hub chooses.' : 'Who answers each kind of request when no provider is named.') : `Rules for this project: ${profile}`, IN * 2)} />
         {TASKS.map(t => (
           <Pick id={`route-${t.id}`} label={t.label} value={encodeRoute(routes[t.id])} options={routeOptions} onSelect={v => setRoute(t.id, v)} />
         ))}

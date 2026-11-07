@@ -8,7 +8,7 @@ import type { Capability, Level, Route, Routes, Task } from '../types'
 import { hasCapability } from './models'
 import { type ErrorKind, mayFallBack } from './cli'
 import { allowProjectRead } from './permissions'
-import { PROVIDERS } from './registry'
+import { PROVIDERS, provider } from './registry'
 import { type RequestResult, readiness, runRequest } from './requests'
 import { type SmartPick, smartPick } from './smart'
 import { DEFAULT_SETTINGS } from './state'
@@ -46,7 +46,33 @@ export async function candidates($: EngineInterface): Promise<string[]> {
   return ready.sort((a, b) => score(a) - score(b))
 }
 
-/** Where a task goes, and why. */
+const labelOf = (id: string): string => provider(id)?.label ?? id
+
+/**
+ * With Smart routing on: the default provider's best model for the task when it
+ * can take it, else the smart pick over every ready provider, with the reason
+ * naming the default it passed over.
+ */
+export async function smartOrDefault(
+  $: EngineInterface,
+  task: Task,
+  opts: { needs?: Capability[]; level?: Level } = {},
+): Promise<SmartPick | { reason: string }> {
+  const d = (await read($, settings)).defaultProvider
+  if (!d) return smartPick($, task, opts)
+  const own = await smartPick($, task, { ...opts, only: d })
+  if ('route' in own) return { ...own, reason: `default provider: ${own.reason}` }
+  const skip = `default provider ${labelOf(d)} skipped: ${own.reason}`
+  const any = await smartPick($, task, opts)
+  return 'route' in any ? { ...any, reason: `${any.reason} (${skip})` } : { reason: `${any.reason} (${skip})` }
+}
+
+/**
+ * Where a task goes, and why. The order: a provider named in the request (not
+ * routed at all), then the rule for the task, then the default provider, then
+ * the smart pick (or, with Smart routing off, the first ready provider). A rule
+ * or default that cannot take the request is named in the reason.
+ */
 export async function route(
   $: EngineInterface,
   task: Task,
@@ -58,13 +84,17 @@ export async function route(
   const ready = await candidates($)
   // a level with no task named goes by the level, not by the rule for general questions
   const rule = level && !isTaskNamed ? undefined : routes[task]
-  if (rule && ready.includes(rule.provider)) {
-    return { route: rule, reason: `${profile === 'global' ? 'routing rule' : 'project rule'} for ${task}` }
+  const kind = `${profile === 'global' ? 'routing rule' : 'project rule'} for ${task}`
+  const skipped: string[] = []
+  if (rule) {
+    if (ready.includes(rule.provider)) return { route: rule, reason: kind }
+    skipped.push(`${kind}: ${labelOf(rule.provider)} not ready`)
   }
+  const said = (reason: string): string => (skipped.length ? `${reason} (skipped ${skipped.join('; ')})` : reason)
   const s = await read($, settings)
   if (s.smartRouting !== false) {
-    const pick = await smartPick($, task, { needs, level })
-    return 'route' in pick ? { route: pick.route, reason: pick.reason } : { reason: pick.reason }
+    const pick = await smartOrDefault($, task, { needs, level })
+    return 'route' in pick ? { route: pick.route, reason: said(pick.reason) } : { reason: said(pick.reason) }
   }
   const all = await read($, models)
   const fits = (id: string): Route | undefined => {
@@ -73,15 +103,16 @@ export async function route(
     const m = list.find(x => needs.every(c => hasCapability(x, c) === true))
     return m ? { provider: id, model: m.id } : undefined
   }
-  if (s.defaultProvider && ready.includes(s.defaultProvider)) {
-    const r = fits(s.defaultProvider)
-    if (r) return { route: r, reason: 'default provider' }
+  if (s.defaultProvider) {
+    const r = ready.includes(s.defaultProvider) ? fits(s.defaultProvider) : undefined
+    if (r) return { route: r, reason: said('default provider') }
+    skipped.push(`default provider ${labelOf(s.defaultProvider)}: ${ready.includes(s.defaultProvider) ? `no model reports ${needs.join(', ')}` : 'not ready'}`)
   }
   for (const id of ready) {
     const r = fits(id)
-    if (r) return { route: r, reason: needs.length ? `first ready provider with ${needs.join(', ')}` : 'first ready provider' }
+    if (r) return { route: r, reason: said(needs.length ? `first ready provider with ${needs.join(', ')}` : 'first ready provider') }
   }
-  return { reason: needs.length ? `no connected model reports ${needs.join(', ')}` : 'no provider is connected and ready' }
+  return { reason: said(needs.length ? `no connected model reports ${needs.join(', ')}` : 'no provider is connected and ready') }
 }
 
 /**
