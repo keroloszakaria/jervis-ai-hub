@@ -5,7 +5,7 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import { begin, finish, redact } from './activity'
+import { begin, finish, redact, redactKeys } from './activity'
 import { clean, dirOf, errText, exe, onPath } from './cli'
 import { resolveModel } from './models'
 import { provider } from './registry'
@@ -109,7 +109,7 @@ export async function delegate(
   const git = (result?.git ?? {}) as { touchedFiles?: unknown }
   const touched = Array.isArray(git.touchedFiles) ? git.touchedFiles.filter((f): f is string => typeof f === 'string') : undefined
   const status = typeof result?.status === 'string' ? result.status : code === 0 ? 'completed' : 'failed'
-  const final = typeof result?.finalMessage === 'string' ? result.finalMessage : ''
+  const final = typeof result?.finalMessage === 'string' ? redactKeys(result.finalMessage) : ''
   const isOk = status === 'completed'
   await finish($, actId, {
     state: isOk ? 'ok' : 'error',

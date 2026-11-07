@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.3
+
+Security fixes:
+
+- **Job results are marked as data:** a job's result comes back to Claude inside a tag with a random name, after a line saying which model wrote it, that it is not the person's words, and that requests in it are not instructions. A result cannot close the tag, because it cannot know its name. `job_status` shows a whole result the same way.
+- **Keys are removed from answers:** a successful answer (`ask_ai`, `compare_ai`, jobs, a relay's final message) has the key the request used, and anything shaped like a provider key or a bearer token, replaced with `[redacted]` before Claude reads it. Commit ids and ordinary text are left as they are.
+
 ## 0.9.2
 
 - **Meters stay still on scroll:** the limit meters and the activity chart no longer grow from zero each time the pane scrolls or redraws. They show their value at once.

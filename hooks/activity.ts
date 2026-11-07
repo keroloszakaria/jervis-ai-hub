@@ -37,6 +37,22 @@ export function redact(text: string, exact: readonly string[] = []): string {
   return out
 }
 
+// key shapes that are unmistakable: safe to strip from an answer Claude reads
+// (every pattern but the last two, the "key: value" and long-hex ones)
+const KEY_PATTERNS: RegExp[] = SECRET_PATTERNS.slice(0, -2)
+
+/**
+ * For answers: removes the exact secrets given and anything shaped like a
+ * provider key or a bearer token. Unlike redact, it leaves long hex (commit
+ * ids) and words like "token: …" alone, so ordinary answers stay intact.
+ */
+export function redactKeys(text: string, exact: readonly string[] = []): string {
+  let out = text
+  for (const value of exact) if (value.length >= 6) out = out.split(value).join('[redacted]')
+  for (const re of KEY_PATTERNS) out = out.replace(re, '[redacted]')
+  return out
+}
+
 export const snip = (s: string, n: number): string => {
   const one = s.replace(/\s+/g, ' ').trim()
   return one.length > n ? `${one.slice(0, Math.max(1, n - 1))}…` : one

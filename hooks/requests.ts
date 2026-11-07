@@ -5,7 +5,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { ActivityType, Mode, Task, Usage } from '../types'
-import { begin, finish, redact } from './activity'
+import { begin, finish, redact, redactKeys } from './activity'
 import { revealForRequest } from './auth'
 import { ERROR_LABEL, type ErrorKind, MAX_ARG_PROMPT, argvOf, classifyError, errText, exe, invocation, parse, parseOpencodeExport, sandboxDir, timeoutFor } from './cli'
 import { resolveModel } from './models'
@@ -257,8 +257,9 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     const ms = (await $.clock.now()) - started
     const secrets = secret ? [secret] : []
     const errorKind = parsed.isOk ? undefined : classifyError(parsed.error ?? '')
+    // a successful answer is cleaned too: a model may echo the key it was given
     const text = parsed.isOk
-      ? parsed.text
+      ? redactKeys(parsed.text, secrets)
       : redact(`${p.label} failed (${ERROR_LABEL[errorKind ?? 'unknown']}): ${parsed.error ?? 'unknown error'}`, secrets)
     await finish(
       $,
