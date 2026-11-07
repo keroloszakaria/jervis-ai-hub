@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.2
+
+- **Meters stay still on scroll:** the limit meters and the activity chart no longer grow from zero each time the pane scrolls or redraws. They show their value at once.
+
 ## 0.9.1
 
 - **A refused subagent starts no job:** when Claude Code itself refuses a subagent the hub asks for (in Auto mode its permission check can), no failed row is left above the prompt. Claude is told that the refusal came from Claude Code, with its reason, and which other AI `runner: "other-ai"` would use for that level.

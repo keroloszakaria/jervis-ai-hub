@@ -159,10 +159,9 @@ const meterSvg = (pct: number, width: number): string => {
   const fw = f === 0 ? 0 : Math.max(6, (w * f) / 100)
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="8" viewBox="0 0 ${w} 8" style="overflow:visible">` +
-    `<style>.f{transform-origin:0 50%;animation:m .8s cubic-bezier(.2,.9,.25,1) both}@keyframes m{from{transform:scaleX(0)}to{transform:scaleX(1)}}</style>` +
     `<defs><linearGradient id="m" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="${c[0]}"/><stop offset="1" stop-color="${c[1]}"/></linearGradient></defs>` +
     `<rect width="${w}" height="8" rx="4" fill="#FFFFFF" fill-opacity="0.10"/>` +
-    (fw ? `<rect class="f" width="${fw.toFixed(1)}" height="8" rx="4" fill="url(#m)" style="filter:drop-shadow(0 0 4px ${c[1]})"/>` : '') +
+    (fw ? `<rect width="${fw.toFixed(1)}" height="8" rx="4" fill="url(#m)" style="filter:drop-shadow(0 0 4px ${c[1]})"/>` : '') +
     `</svg>`
   )
 }
@@ -182,13 +181,13 @@ const latencySvg = (rows: Activity[], width: number): string => {
     .map((a, i) => {
       const h = Math.max(3, Math.round(((a.ms ?? 0) / max) * (H - 10)))
       const tip = esc(`${a.type} · ${a.provider}${a.model ? ` · ${a.model}` : ''} · ${a.ms !== undefined ? `${(a.ms / 1000).toFixed(1)}s` : 'running'}${a.state === 'error' ? ' · failed' : ''}`)
-      return `<rect class="b" style="animation-delay:${(i * 0.035).toFixed(3)}s" x="${(i * slot + (slot - bar) / 2).toFixed(1)}" y="${H - 4 - h}" width="${bar.toFixed(1)}" height="${h}" rx="3" fill="url(#${grad(a)})"><title>${tip}</title></rect>`
+      return `<rect class="b" x="${(i * slot + (slot - bar) / 2).toFixed(1)}" y="${H - 4 - h}" width="${bar.toFixed(1)}" height="${h}" rx="3" fill="url(#${grad(a)})"><title>${tip}</title></rect>`
     })
     .join('')
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${H}" viewBox="0 0 ${width} ${H}">` +
-    `<style>.b{transform-box:fill-box;transform-origin:50% 100%;animation:g .7s cubic-bezier(.2,.9,.25,1) both;transition:filter .15s,opacity .15s}` +
-    `@keyframes g{from{transform:scaleY(0);opacity:0}to{transform:scaleY(1);opacity:1}}` +
+    // no entrance animation: the pane redraws the image on scroll, and it would replay each time
+    `<style>.b{transition:filter .15s,opacity .15s}` +
     `svg:hover .b{opacity:.55}.b:hover{opacity:1!important;filter:brightness(1.25) drop-shadow(0 0 6px rgba(255,106,0,.9))}</style>` +
     `<defs>` +
     `<linearGradient id="t" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFB070"/><stop offset="1" stop-color="#FF6A00"/></linearGradient>` +
