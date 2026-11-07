@@ -141,7 +141,7 @@ function engine(on: any, w: World) {
   on('fs.list', () => ({ value: [{ name: 'abc', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }))
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: w.exists ? w.exists(winPath(e.path)) : true }))
   on('fs.write', (_: unknown, e: { path: string; content?: string; text?: string; data?: string }) => {
-    ;(w.written ??= {})[e.path] = String(e.content ?? e.text ?? e.data ?? '')
+    ;(w.written ??= {})[winPath(e.path)] = String(e.content ?? e.text ?? e.data ?? '')
     return { value: undefined }
   })
   on('clock.now', () => ({ value: (w.now = (w.now ?? 1_000_000) + (w.step ?? 0)) }))
