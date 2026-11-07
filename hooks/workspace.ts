@@ -3,11 +3,17 @@
 // says yes. Copying, comparing and applying go through a git repository of the
 // hub's own for each run (the engine writes text files only), so binary files
 // are copied as they are and the person's own `.git` is never written.
+//
+// What a run is (its folder, its base) lives in the hub's memory and its
+// plugin store, never in a file beside the copy: an agent that can write
+// there cannot point an apply at another folder. The run's own paths come
+// from its id alone, and the hub's git config is written again before each use.
 import type { EngineInterface } from 'claude-code'
 
 import { errText } from './cli'
 import { homeDir, joinPath, osName } from './platform'
 import type { OsName } from './platform'
+import { provider } from './registry'
 
 /** More files than this, or more content, refuses the run: nothing is sent. */
 export const MAX_COPY_FILES = 20_000
@@ -29,7 +35,26 @@ const SECRET_NAMES: RegExp[] = [
   /^\.netrc$/i,
 ]
 
-/** Whether a path (relative, `/`-separated) is left out of the copy. */
+/**
+ * What a file with a key in it looks like, whatever its name: shapes specific
+ * enough not to catch ordinary code. git grep reads them as extended regular
+ * expressions, and skips binary files.
+ */
+export const SECRET_CONTENT: string[] = [
+  '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----',
+  'AKIA[0-9A-Z]{16}',
+  'gh[pousr]_[A-Za-z0-9]{36,}',
+  'github_pat_[A-Za-z0-9_]{22,}',
+  'sk-(ant-|proj-)?[A-Za-z0-9_-]{32,}',
+  'AIza[0-9A-Za-z_-]{35}',
+  '(sk|rk)_live_[0-9A-Za-z]{20,}',
+  'xox[abprs]-[0-9A-Za-z-]{10,}',
+]
+
+/** The file in the folder's root whose patterns (as in .gitignore) are left out of the copy too. */
+export const IGNORE_FILE = '.jervisignore'
+
+/** Whether a path (relative, `/`-separated) is left out of the copy by its name. */
 export function isLeftOut(path: string): boolean {
   const parts = path.split('/')
   if (parts.some(p => p.toLowerCase() === '.git')) return true
@@ -37,13 +62,15 @@ export function isLeftOut(path: string): boolean {
   return SECRET_NAMES.some(r => r.test(name))
 }
 
+export type LeftOut = { path: string; why: 'name' | 'link' | 'content' | 'ignore-file' }
+
 export type WorkRun = {
   id: string
-  /** the person's folder, as resolved and approved */
+  /** the person's folder, as resolved and approved; the question names this folder, never another */
   folder: string
-  /** how the question names it */
+  /** the folder, as questions name it */
   shown: string
-  /** the run's own folder: `git/`, `tree/`, `run.json`, `changes.patch` */
+  /** the run's own folder: `git/`, `tree/`, `changes.patch` (from the id alone) */
   root: string
   git: string
   tree: string
@@ -51,13 +78,21 @@ export type WorkRun = {
   base: string
   provider: string
   createdAt: number
-  /** the files left out because of their names */
-  leftOut: string[]
+  leftOut: LeftOut[]
 }
 
-export type Change = { status: 'A' | 'M' | 'D' | 'T'; path: string }
+/** What the hub keeps of a run; the rest follows from its id. */
+type RunRecord = Pick<WorkRun, 'id' | 'folder' | 'base' | 'provider' | 'createdAt' | 'leftOut'>
+
+/** `isLink`: the run made it a link or a submodule, which the hub never applies. */
+export type Change = { status: 'A' | 'M' | 'D' | 'T'; path: string; isLink?: boolean }
 
 export type Compared = { changes: Change[]; stat: string; patchPath: string }
+
+const RUN_ID = /^run-(\d+)-[0-9a-f]{16}$/
+const RUNS_KEY = 'hub-work-runs-v1'
+/** this session's runs: what a later reading of the store must agree with */
+const known = new Map<string, RunRecord>()
 
 // byte-exact copies, no hooks, no background work, paths as they are
 const GIT_FLAGS = [
@@ -101,6 +136,16 @@ function must(r: Git, what: string): string {
 
 const nul = (out: string) => out.split('\0').filter(Boolean)
 
+/**
+ * The hub's git config and attributes for a run, written again before each
+ * use: whatever was put there meanwhile (a filter, an external diff) is gone.
+ */
+async function sealGit($: EngineInterface, gitDir: string): Promise<void> {
+  const os = await osName($)
+  await $.fs.write(joinPath(os, gitDir, 'config'), `[core]\n\trepositoryformatversion = 0\n\tfilemode = ${os === 'windows' ? 'false' : 'true'}\n\tbare = true\n`)
+  await $.fs.write(joinPath(os, gitDir, 'info', 'attributes'), '')
+}
+
 /** `~/.claude/jervis-ai-hub/work`: every run's folder is in here, and nothing else is ever removed. */
 export async function workRoot($: EngineInterface): Promise<string> {
   return joinPath(await osName($), await homeDir($), '.claude', 'jervis-ai-hub', 'work')
@@ -110,6 +155,13 @@ function runId(stamp: number): string {
   const b = new Uint8Array(8)
   crypto.getRandomValues(b)
   return `run-${stamp}-${[...b].map(x => x.toString(16).padStart(2, '0')).join('')}`
+}
+
+/** A run's paths, from its id alone. */
+async function pathsOf($: EngineInterface, id: string): Promise<Pick<WorkRun, 'root' | 'git' | 'tree'>> {
+  const os = await osName($)
+  const root = joinPath(os, await workRoot($), id)
+  return { root, git: joinPath(os, root, 'git'), tree: joinPath(os, root, 'tree') }
 }
 
 /** The files to copy, relative to the folder: git's own list in a repository, else every file not ignored. */
@@ -140,29 +192,43 @@ async function filesOf($: EngineInterface, folder: string, gitDir: string): Prom
   return [...new Set(all)].filter(p => !deleted.has(p) && !p.endsWith('/'))
 }
 
+/** Index entries as `{ mode, path }`, from `ls-files -s -z`. */
+function staged(out: string): { mode: string; blob: string; path: string }[] {
+  return nul(out).map(l => {
+    const tab = l.indexOf('\t')
+    const [mode = '', blob = ''] = l.slice(0, tab).split(' ')
+    return { mode, blob, path: l.slice(tab + 1) }
+  })
+}
+
+const isLinkMode = (mode: string) => mode === '120000' || mode === '160000'
+
+async function dropFromIndex($: EngineInterface, gitDir: string, folder: string, paths: string[]): Promise<void> {
+  if (!paths.length) return
+  // the index only: --force-remove never touches the folder's files
+  must(await hubGit($, gitDir, folder, ['update-index', '--force-remove', '-z', '--stdin'], { stdin: `${paths.join('\0')}\0` }), 'leaving files out')
+}
+
 /**
- * Copies `folder` into a run's own `tree/`, without `.git`, ignored files or
- * the usual secret files. Throws with the reason when it cannot, or when the
- * folder is over the caps; then nothing was copied that stays.
+ * Copies `folder` into a run's own `tree/`, without `.git`, ignored files,
+ * links, submodules, the usual secret files, files with what looks like a key
+ * inside, or what `.jervisignore` names. Throws with the reason when it cannot,
+ * or when the folder is over the caps; then nothing was copied that stays.
  */
-export async function makeCopy(
-  $: EngineInterface,
-  a: { folder: string; shown: string; provider: string },
-): Promise<WorkRun> {
+export async function makeCopy($: EngineInterface, a: { folder: string; shown?: string; provider: string }): Promise<WorkRun> {
   const os = await osName($)
   const stamp = await $.clock.now()
   const id = runId(stamp)
-  const root = joinPath(os, await workRoot($), id)
-  const gitDir = joinPath(os, root, 'git')
-  const tree = joinPath(os, root, 'tree')
+  const { root, git: gitDir, tree } = await pathsOf($, id)
   try {
     // a bare repository of the hub's own; the person's .git is never written
     must(await hubGit($, gitDir, undefined, ['init', '-q', '--bare', gitDir], { cwd: await homeDir($) }), 'starting the copy')
+    await sealGit($, gitDir)
     const files = await filesOf($, a.folder, gitDir)
-    const leftOut = files.filter(isLeftOut)
+    const leftOut: LeftOut[] = files.filter(isLeftOut).map(path => ({ path, why: 'name' }))
     const keep = files.filter(p => !isLeftOut(p))
     if (keep.length > MAX_COPY_FILES) {
-      throw new Error(`${a.shown} has ${keep.length} files to copy, more than the ${MAX_COPY_FILES} a copy may hold`)
+      throw new Error(`${a.folder} has ${keep.length} files to copy, more than the ${MAX_COPY_FILES} a copy may hold`)
     }
     if (keep.length) {
       must(
@@ -170,22 +236,38 @@ export async function makeCopy(
         'copying the files',
       )
     }
+    // links and submodules stay out: a link could lead out of the copy
+    const links = staged(must(await hubGit($, gitDir, undefined, ['ls-files', '-s', '-z']), 'reading the copy')).filter(e => isLinkMode(e.mode)).map(e => e.path)
+    await dropFromIndex($, gitDir, a.folder, links)
+    leftOut.push(...links.map(path => ({ path, why: 'link' as const })))
+    // what the folder's own .jervisignore names
+    const ignoreFile = joinPath(os, a.folder, IGNORE_FILE)
+    if (await $.fs.exists(ignoreFile).catch(() => false)) {
+      const named = nul(must(await hubGit($, gitDir, a.folder, ['ls-files', '-z', '-c', '-i', `--exclude-from=${ignoreFile}`]), `reading ${IGNORE_FILE}`))
+      await dropFromIndex($, gitDir, a.folder, named)
+      leftOut.push(...named.map(path => ({ path, why: 'ignore-file' as const })))
+    }
+    // files with what looks like a key inside, whatever their name (git grep exits 1 when nothing matches)
+    const grep = await hubGit($, gitDir, undefined, ['grep', '--cached', '-I', '-l', '-z', '-E', ...SECRET_CONTENT.flatMap(p => ['-e', p])])
+    if (grep.code > 1) throw new Error(`looking for keys in the files failed: ${(grep.err || grep.out).trim().slice(0, 200)}`)
+    const keyed = grep.code === 0 ? nul(grep.out) : []
+    await dropFromIndex($, gitDir, a.folder, keyed)
+    leftOut.push(...keyed.map(path => ({ path, why: 'content' as const })))
     // the content's size, from the blobs git now holds
-    const staged = must(await hubGit($, gitDir, undefined, ['ls-files', '-s', '-z']), 'reading the copy')
-    const blobs = nul(staged).map(l => l.split(' ')[1] ?? '').filter(Boolean)
+    const blobs = staged(must(await hubGit($, gitDir, undefined, ['ls-files', '-s', '-z']), 'reading the copy')).map(e => e.blob).filter(Boolean)
     if (blobs.length) {
       const sizes = must(await hubGit($, gitDir, undefined, ['cat-file', '--batch-check=%(objectsize)'], { stdin: `${blobs.join('\n')}\n` }), 'measuring the copy')
       const bytes = sizes.split(/\r?\n/).reduce((n, s) => n + (Number(s) || 0), 0)
       if (bytes > MAX_COPY_BYTES) {
-        throw new Error(`${a.shown} has ${Math.round(bytes / 1024 / 1024)} MB to copy, more than the ${MAX_COPY_BYTES / 1024 / 1024} MB a copy may hold`)
+        throw new Error(`${a.folder} has ${Math.round(bytes / 1024 / 1024)} MB to copy, more than the ${MAX_COPY_BYTES / 1024 / 1024} MB a copy may hold`)
       }
     }
     const base = must(await hubGit($, gitDir, undefined, ['write-tree']), 'recording the copy').trim()
     await $.fs.write(joinPath(os, tree, '.jervis-copy'), '')
     must(await hubGit($, gitDir, tree, ['checkout-index', '-a', '-f']), 'writing the copy')
-    const run: WorkRun = { id, folder: a.folder, shown: a.shown, root, git: gitDir, tree, base, provider: a.provider, createdAt: stamp, leftOut }
-    await $.fs.write(joinPath(os, root, 'run.json'), JSON.stringify(run, null, 2))
-    return run
+    const record: RunRecord = { id, folder: a.folder, base, provider: a.provider, createdAt: stamp, leftOut }
+    await remember($, record)
+    return { ...record, shown: a.folder, root, git: gitDir, tree }
   } catch (error) {
     await removeRun($, root)
     throw error
@@ -195,16 +277,19 @@ export async function makeCopy(
 /** What the run changed in its copy, as git reads it against the base, with the patch saved beside it. */
 export async function compare($: EngineInterface, run: WorkRun): Promise<Compared> {
   const os = await osName($)
+  await sealGit($, run.git)
   const index = joinPath(os, run.root, 'after.index')
   must(await hubGit($, run.git, run.tree, ['read-tree', run.base], { index }), 'reading the base')
   must(await hubGit($, run.git, run.tree, ['add', '-A', '--', '.', ':(exclude).jervis-copy'], { index }), 'reading the copy')
-  const names = nul(must(await hubGit($, run.git, run.tree, ['diff', '--cached', '--no-renames', '--name-status', '-z', run.base], { index }), 'comparing'))
+  // the raw form carries each file's mode, so a link the run made is seen as one
+  const raw = nul(must(await hubGit($, run.git, run.tree, ['diff', '--cached', '--no-renames', '--raw', '-z', run.base], { index }), 'comparing'))
   const changes: Change[] = []
-  for (let i = 0; i + 1 < names.length; i += 2) {
-    const status = names[i]!.charAt(0) as Change['status']
-    const path = names[i + 1]!
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    const [, newMode = ''] = raw[i]!.replace(/^:/, '').split(' ')
+    const status = (raw[i]!.trim().split(' ').pop() ?? 'M').charAt(0) as Change['status']
+    const path = raw[i + 1]!
     if (path === '.jervis-copy') continue
-    changes.push({ status, path })
+    changes.push({ status, path, ...(isLinkMode(newMode) ? { isLink: true } : {}) })
   }
   const stat = changes.length
     ? must(await hubGit($, run.git, run.tree, ['diff', '--cached', '--no-renames', '--stat=120', run.base], { index }), 'summing up').trimEnd()
@@ -223,6 +308,7 @@ export async function compare($: EngineInterface, run: WorkRun): Promise<Compare
 export async function changedSince($: EngineInterface, run: WorkRun, changes: Change[]): Promise<string[]> {
   if (!changes.length) return []
   const os = await osName($)
+  await sealGit($, run.git)
   const index = joinPath(os, run.root, 'check.index')
   must(await hubGit($, run.git, run.folder, ['read-tree', run.base], { index }), 'reading the base')
   const paths = changes.map(c => c.path)
@@ -247,12 +333,20 @@ export async function changedSince($: EngineInterface, run: WorkRun, changes: Ch
 
 export type Applied = { isOk: true } | { isOk: false; why: string; files?: string[] }
 
-/** Writes the run's changes into the folder, only when none of its files changed since the copy. Nothing is staged or committed. */
+/**
+ * Writes the run's changes into the folder, only when none of its files
+ * changed since the copy and none of them is a link. `git apply` checks every
+ * file before it writes any, so a file changed between this check and the
+ * apply fails the whole apply. Nothing is staged or committed.
+ */
 export async function applyRun($: EngineInterface, run: WorkRun, c: Compared): Promise<Applied> {
   if (!c.changes.length) return { isOk: true }
+  const links = c.changes.filter(x => x.isLink).map(x => x.path)
+  if (links.length) return { isOk: false, why: 'the run made links or submodules, which the hub never applies, so nothing was applied', files: links }
   try {
     const since = await changedSince($, run, c.changes)
     if (since.length) return { isOk: false, why: 'these files changed in the folder after the copy was made, so nothing was applied', files: since }
+    await sealGit($, run.git)
     const r = await hubGit($, run.git, run.folder, ['apply', '--binary', '--whitespace=nowarn', c.patchPath], { cwd: run.folder })
     if (r.code !== 0) return { isOk: false, why: `git could not apply the changes (${(r.err || r.out).trim().slice(0, 300)}); nothing was applied` }
     return { isOk: true }
@@ -261,15 +355,67 @@ export async function applyRun($: EngineInterface, run: WorkRun, c: Compared): P
   }
 }
 
-/** A kept run, read back from its folder; undefined when there is none by that id. */
-export async function readRun($: EngineInterface, id: string): Promise<WorkRun | undefined> {
-  if (!/^run-\d+-[0-9a-f]{16}$/.test(id)) return undefined
-  const os = await osName($)
+async function storedRuns($: EngineInterface): Promise<Record<string, RunRecord>> {
   try {
-    return JSON.parse(await $.fs.read(joinPath(os, await workRoot($), id, 'run.json'))) as WorkRun
+    const v = await $.store.get(RUNS_KEY)
+    return v && typeof v === 'object' ? (v as Record<string, RunRecord>) : {}
   } catch {
-    return undefined
+    return {}
   }
+}
+
+async function remember($: EngineInterface, r: RunRecord): Promise<void> {
+  known.set(r.id, r)
+  const all = await storedRuns($)
+  all[r.id] = r
+  await $.store.set(RUNS_KEY, all)
+}
+
+async function forget($: EngineInterface, id: string): Promise<void> {
+  known.delete(id)
+  const all = await storedRuns($)
+  if (id in all) {
+    delete all[id]
+    await $.store.set(RUNS_KEY, all)
+  }
+}
+
+/** Whether a stored record is one the hub could have written: its id, an absolute folder, a git tree id, a known provider. */
+function isRecord(id: string, r: unknown): r is RunRecord {
+  if (!r || typeof r !== 'object') return false
+  const x = r as Record<string, unknown>
+  const m = RUN_ID.exec(id)
+  return (
+    x.id === id &&
+    m !== null &&
+    x.createdAt === Number(m[1]) &&
+    typeof x.folder === 'string' &&
+    (/^[a-zA-Z]:\\/.test(x.folder) || x.folder.startsWith('/') || x.folder.startsWith('\\\\')) &&
+    !/[\0\r\n]/.test(x.folder) &&
+    typeof x.base === 'string' &&
+    /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(x.base) &&
+    typeof x.provider === 'string' &&
+    provider(x.provider) !== undefined &&
+    Array.isArray(x.leftOut)
+  )
+}
+
+/**
+ * A kept run by its id: this session's own record when it has one, else the
+ * plugin store's, which must have the shape the hub writes. Its paths come
+ * from the id, so no record can move them. Undefined when there is none.
+ */
+export async function readRun($: EngineInterface, id: string): Promise<WorkRun | undefined> {
+  if (!RUN_ID.test(id)) return undefined
+  const stored = (await storedRuns($))[id]
+  const mine = known.get(id)
+  const r = mine ?? stored
+  if (!isRecord(id, r)) return undefined
+  // a store changed after this session wrote it is not trusted
+  if (mine && stored && JSON.stringify(stored) !== JSON.stringify(mine)) return undefined
+  const p = await pathsOf($, id)
+  if (!(await $.fs.exists(p.git).catch(() => false))) return undefined
+  return { ...r, shown: r.folder, ...p }
 }
 
 /** Whether `path` is a run's own folder: directly under the work root and named as a run. */
@@ -279,14 +425,14 @@ export async function isRunFolder($: EngineInterface, path: string): Promise<boo
   const sep = os === 'windows' ? '\\' : '/'
   const norm = (p: string) => (os === 'windows' ? p.replace(/\//g, '\\').toLowerCase() : p)
   if (!norm(path).startsWith(norm(root) + sep)) return false
-  const rest = path.slice(root.length + 1)
-  return /^run-\d+-[0-9a-f]{16}$/.test(rest)
+  return RUN_ID.test(path.slice(root.length + 1))
 }
 
-/** Removes a run's own folder; any other path is left alone. */
+/** Removes a run's own folder and its record; any other path is left alone. */
 export async function removeRun($: EngineInterface, path: string): Promise<void> {
   if (!(await isRunFolder($, path))) return
   const os: OsName = await osName($)
+  await forget($, path.slice((await workRoot($)).length + 1)).catch(() => undefined)
   try {
     if (os === 'windows') await $.process.run(['cmd.exe', '/d', '/c', 'rmdir', '/s', '/q', path], { timeoutMs: 120_000 })
     else await $.process.run(['rm', '-rf', '--', path], { timeoutMs: 120_000 })
@@ -295,7 +441,7 @@ export async function removeRun($: EngineInterface, path: string): Promise<void>
   }
 }
 
-/** Kept runs older than a week are removed (called as a session starts). */
+/** Kept runs older than a week are removed (called as a session starts), with records left without a folder. */
 export async function cleanOldRuns($: EngineInterface, now: number, maxAgeMs = 7 * 24 * 60 * 60 * 1000): Promise<void> {
   const os = await osName($)
   const root = await workRoot($)
@@ -303,28 +449,47 @@ export async function cleanOldRuns($: EngineInterface, now: number, maxAgeMs = 7
   try {
     entries = await $.fs.list(root)
   } catch {
-    return
+    entries = []
   }
   for (const e of entries) {
-    const m = /^run-(\d+)-[0-9a-f]{16}$/.exec(e.name)
+    const m = RUN_ID.exec(e.name)
     if (!m || e.kind !== 'dir') continue
     if (now - Number(m[1]) > maxAgeMs) await removeRun($, joinPath(os, root, e.name))
+  }
+  const all = await storedRuns($)
+  const there = new Set(entries.map(e => e.name))
+  const stale = Object.keys(all).filter(id => !there.has(id) || !RUN_ID.test(id))
+  if (stale.length) {
+    for (const id of stale) delete all[id]
+    await $.store.set(RUNS_KEY, all).catch(() => undefined)
   }
 }
 
 /** The kept runs, newest first. */
 export async function keptRuns($: EngineInterface): Promise<WorkRun[]> {
-  let entries: { name: string; kind: string }[] = []
-  try {
-    entries = await $.fs.list(await workRoot($))
-  } catch {
-    return []
-  }
   const runs: WorkRun[] = []
-  for (const e of entries) {
-    if (e.kind !== 'dir') continue
-    const r = await readRun($, e.name)
+  for (const id of Object.keys(await storedRuns($))) {
+    const r = await readRun($, id)
     if (r) runs.push(r)
   }
   return runs.sort((a, b) => b.createdAt - a.createdAt)
+}
+
+/** How an answer names what was left out of the copy, and why. */
+export function leftOutLine(left: LeftOut[], max = 10): string {
+  if (!left.length) return ''
+  const groups: [LeftOut['why'], string][] = [
+    ['name', 'by their names'],
+    ['content', 'with what looks like a key inside'],
+    ['link', 'links and submodules'],
+    ['ignore-file', `named in ${IGNORE_FILE}`],
+  ]
+  const parts = groups
+    .map(([why, label]) => {
+      const paths = left.filter(l => l.why === why).map(l => l.path)
+      if (!paths.length) return ''
+      return `${label}: ${paths.slice(0, max).join(', ')}${paths.length > max ? ` and ${paths.length - max} more` : ''}`
+    })
+    .filter(Boolean)
+  return `Left out of the copy, ${parts.join('; ')}.`
 }

@@ -3,19 +3,27 @@
 // included), compare, apply, and an apply refused after the folder changed.
 // CI runs it on Linux, Windows and macOS. By hand: npx -y tsx@4.19.2 ci/real-workspace.ts
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { applyRun, changedSince, cleanOldRuns, compare, isLeftOut, makeCopy, removeRun } from '../hooks/workspace'
+import { applyRun, changedSince, cleanOldRuns, compare, isLeftOut, makeCopy, readRun, removeRun } from '../hooks/workspace'
 
 const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'hub-workspace-')))
 const home = join(root, 'home')
 mkdirSync(home)
 
+// the plugin store, in memory; and a hook run just before `git apply`, to change the folder at that moment
+const store = new Map<string, unknown>()
+let beforeApply: (() => void) | undefined
+
 // the few engine calls the copy makes, answered by this process; home is a throwaway folder
 const $ = {
   env: { get: async (name: string) => (name === 'USERPROFILE' || name === 'HOME' ? home : process.env[name]) },
+  store: {
+    get: async (key: string) => (store.has(key) ? JSON.parse(JSON.stringify(store.get(key))) : undefined),
+    set: async (key: string, value: unknown) => void store.set(key, JSON.parse(JSON.stringify(value))),
+  },
   clock: { now: async () => Date.now() },
   fs: {
     read: async (path: string) => readFileSync(path, 'utf8'),
@@ -29,6 +37,10 @@ const $ = {
   },
   process: {
     run: async (argv: string[], opts?: { timeoutMs?: number; stdin?: string; cwd?: string; env?: Record<string, string> }) => {
+      if (argv.includes('apply') && beforeApply) {
+        beforeApply()
+        beforeApply = undefined
+      }
       const r = spawnSync(argv[0]!, argv.slice(1), {
         encoding: 'utf8',
         input: opts?.stdin,
@@ -102,7 +114,8 @@ async function main(): Promise<void> {
     check('a text file is copied byte for byte (no line-ending change)', readFileSync(join(t, 'a.txt')).equals(readFileSync(join(repo, 'a.txt'))))
     check('a binary file is copied byte for byte', readFileSync(join(t, 'src', 'img.bin')).equals(BIN))
     check('the copy has no .git', !existsSync(join(t, '.git')))
-    check('the copy leaves out .env, though git tracks it', !existsSync(join(t, '.env')) && run.leftOut.includes('.env'), JSON.stringify(run.leftOut))
+    check('the copy leaves out .env, though git tracks it', !existsSync(join(t, '.env')) && run.leftOut.some(l => l.path === '.env' && l.why === 'name'), JSON.stringify(run.leftOut))
+    check('no record of the run is written beside the copy', !existsSync(join(run.root, 'run.json')))
     check('the copy leaves out ignored files', !existsSync(join(t, 'node_modules')))
     check('the copy leaves out a file the person deleted', !existsSync(join(t, 'gone.txt')))
     const gitAfter = gitFiles(repo)
@@ -161,6 +174,92 @@ async function main(): Promise<void> {
 
     check('secret names are left out, others kept', isLeftOut('.env') && isLeftOut('a/.env.local') && isLeftOut('k/id_rsa.pub') && isLeftOut('x.PEM') && !isLeftOut('src/env.ts') && !isLeftOut('keys.ts'))
 
+    // a key in a file with an ordinary name, and what .jervisignore names, stay out
+    const keyed = join(root, 'keyed')
+    mkdirSync(join(keyed, 'config'), { recursive: true })
+    writeFileSync(join(keyed, 'config', 'prod.json'), `{ "token": "ghp_${'a1B2'.repeat(9)}" }\n`)
+    writeFileSync(join(keyed, 'config', 'pem.txt'), '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n')
+    writeFileSync(join(keyed, 'code.ts'), 'export const env = process.env.TOKEN // sk-short\n')
+    writeFileSync(join(keyed, 'notes.private.md'), 'mine\n')
+    writeFileSync(join(keyed, '.jervisignore'), '*.private.md\n')
+    const run5 = await makeCopy($, { folder: keyed, shown: keyed, provider: 'chatgpt' })
+    check('a file with a key inside is left out, whatever its name', !existsSync(join(run5.tree, 'config', 'prod.json')) && !existsSync(join(run5.tree, 'config', 'pem.txt')), JSON.stringify(run5.leftOut))
+    check('ordinary code that mentions a token is copied', existsSync(join(run5.tree, 'code.ts')))
+    check('what .jervisignore names is left out', !existsSync(join(run5.tree, 'notes.private.md')) && run5.leftOut.some(l => l.why === 'ignore-file'))
+
+    // links: a link in the folder that leads out is not copied, and a link the run makes is never applied
+    const linked = join(root, 'linked')
+    mkdirSync(linked)
+    writeFileSync(join(linked, 'ok.txt'), 'ok\n')
+    const secretDir = join(root, 'secret-dir')
+    mkdirSync(secretDir)
+    writeFileSync(join(secretDir, 's.txt'), 'S\n')
+    let canLink = true
+    try {
+      symlinkSync(secretDir, join(linked, 'out'), 'dir')
+      symlinkSync(join(secretDir, 's.txt'), join(linked, 'out.txt'), 'file')
+    } catch {
+      canLink = false
+    }
+    if (canLink) {
+      const run6 = await makeCopy($, { folder: linked, shown: linked, provider: 'chatgpt' })
+      const inCopy = (n: string) => {
+        try {
+          lstatSync(join(run6.tree, n))
+          return true
+        } catch {
+          return false
+        }
+      }
+      check('a link in the folder that leads out is not in the copy', !inCopy('out') && !inCopy('out.txt') && run6.leftOut.some(l => l.why === 'link'), JSON.stringify(run6.leftOut))
+      symlinkSync(join(secretDir, 's.txt'), join(run6.tree, 'made-link'), 'file')
+      writeFileSync(join(run6.tree, 'ok.txt'), 'changed\n')
+      const c6 = await compare($, run6)
+      const r6 = await applyRun($, run6, c6)
+      check('a link the run made is refused, and nothing is applied', !r6.isOk && JSON.stringify(r6).includes('made-link') && readFileSync(join(linked, 'ok.txt'), 'utf8') === 'ok\n', JSON.stringify({ r6, c6 }))
+      await removeRun($, run6.root)
+    } else {
+      console.log('skip links: this system would not make a symbolic link here (on Windows that needs Developer Mode)')
+    }
+
+    // the hub's own git config, changed by someone, is written again before use: no filter runs
+    const run7 = await makeCopy($, { folder: plain, shown: plain, provider: 'chatgpt' })
+    const marker = join(root, 'filter-ran').replace(/\\/g, '/')
+    writeFileSync(join(run7.git, 'config'), `[core]\n\tbare = true\n[filter "evil"]\n\tclean = touch '${marker}'\n\trequired = true\n`)
+    writeFileSync(join(run7.tree, '.gitattributes'), '* filter=evil\n')
+    writeFileSync(join(run7.tree, 'p.txt'), 'p2\n')
+    await compare($, run7)
+    check("a filter put into the hub's git config never runs", !existsSync(marker))
+    // control: the same config, used as it is, does run the filter
+    writeFileSync(join(run7.git, 'config'), `[core]\n\tbare = true\n[filter "evil"]\n\tclean = touch '${marker}'\n\trequired = true\n`)
+    writeFileSync(join(run7.tree, 'p.txt'), 'p3\n')
+    spawnSync('git', [`--git-dir=${run7.git}`, `--work-tree=${run7.tree}`, 'add', '-A'], { cwd: run7.tree, env: { ...process.env, GIT_INDEX_FILE: join(run7.root, 'control.index') } })
+    check('control: that config, used as it is, runs the filter (so the check above means something)', existsSync(marker))
+
+    // a record changed after the hub wrote it is not trusted
+    const rec = store.get('hub-work-runs-v1') as Record<string, { folder: string }>
+    rec[run7.id]!.folder = join(root, 'elsewhere')
+    check('a run whose record was changed is refused', (await readRun($, run7.id)) === undefined)
+    check('a run id that is a path is refused', (await readRun($, '..\\..\\x')) === undefined && (await readRun($, '../../x')) === undefined)
+    await removeRun($, run7.root)
+
+    // a change at the moment of git apply: the whole apply fails, and no file is written
+    const race = join(root, 'race')
+    mkdirSync(race)
+    writeFileSync(join(race, 'one.txt'), 'one\n')
+    writeFileSync(join(race, 'two.txt'), 'two\n')
+    const run8 = await makeCopy($, { folder: race, shown: race, provider: 'chatgpt' })
+    writeFileSync(join(run8.tree, 'one.txt'), 'ONE\n')
+    writeFileSync(join(run8.tree, 'two.txt'), 'TWO\n')
+    const c8 = await compare($, run8)
+    beforeApply = () => writeFileSync(join(race, 'two.txt'), 'theirs\n')
+    const r8 = await applyRun($, run8, c8)
+    check(
+      'a file changed between the check and git apply fails the whole apply: no file is written',
+      !r8.isOk && readFileSync(join(race, 'one.txt'), 'utf8') === 'one\n' && readFileSync(join(race, 'two.txt'), 'utf8') === 'theirs\n',
+      JSON.stringify({ r8, one: readFileSync(join(race, 'one.txt'), 'utf8') }),
+    )
+
     // removal only touches a run's own folder
     await removeRun($, run4.root)
     check("a run's folder is removed", !existsSync(run4.root))
@@ -168,6 +267,7 @@ async function main(): Promise<void> {
     check('any other folder is left alone', existsSync(join(plain, 'p.txt')))
     await cleanOldRuns($, Date.now() + 8 * 24 * 60 * 60 * 1000)
     check('runs older than a week are removed at clean-up', !existsSync(run.root) && !existsSync(run2.root) && !existsSync(run3.root))
+    check('and their records with them', Object.keys((store.get('hub-work-runs-v1') as object) ?? {}).length === 0, JSON.stringify(store.get('hub-work-runs-v1')))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

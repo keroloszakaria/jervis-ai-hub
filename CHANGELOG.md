@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.10.3
+
+Workspace integrity:
+
+- **Kept runs can no longer be pointed elsewhere:** the hub keeps what a run is (its folder, its base) in its memory and its plugin store, not in a `run.json` beside the copy, where an agent allowed to write anywhere could change it. The run's paths come from its id, a record changed during the session is refused, and the question names the folder an Apply would write.
+- **The hub's git config is written again before each use,** so a filter or external diff put into it runs nothing.
+- **Links and submodules stay out of the copy,** and a run that makes one is never applied.
+- **Keys are found by what they look like:** a text file with a private key block or an AWS, GitHub, OpenAI, Anthropic, Google, Stripe live or Slack key is left out of the copy, whatever its name.
+- **`.jervisignore`:** `.gitignore` patterns in a project's root name more files to leave out.
+- The answer says why each file was left out.
+- **Checked with real git:** a key in `config/prod.json`, `.jervisignore`, links (on Linux and macOS), a filter in the hub's config (with a control run), a changed record, and a file changed at the moment of `git apply`: the whole apply fails and no file is written. The real Codex gate passes all 8 checks.
+- Not changed: the review still shows the file list and the patch's path, not each file's diff (planned for 0.10.4).
+
 ## 0.10.2
 
 Writes go to a workspace copy:

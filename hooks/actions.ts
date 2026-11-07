@@ -10,7 +10,7 @@ import { delegate } from './delegation'
 import { filesLine, guardEnv, LOCK_NOTE, refChanges, refusal, snapshot, workState } from './gitguard'
 import { allowProjectRead, allowWrite, folder, reviewChanges, unboundedRefusal } from './permissions'
 import type { RefSnapshot } from './gitguard'
-import { applyRun, compare as compareCopy, makeCopy, readRun, removeRun } from './workspace'
+import { applyRun, compare as compareCopy, leftOutLine, makeCopy, readRun, removeRun } from './workspace'
 import type { Compared, WorkRun } from './workspace'
 import { osName } from './platform'
 import { provider } from './registry'
@@ -224,9 +224,7 @@ async function inCopy(
       text: `Refused: the hub could not make a copy of ${a.shown} to work in (${errText(error)}). Nothing was sent. To write into the folder itself, turn on "Write straight into the folder" in Jervis AI Hub → Settings → Privacy.`,
     }
   }
-  const left = run.leftOut.length
-    ? `\nLeft out of the copy, by their names: ${run.leftOut.slice(0, 10).join(', ')}${run.leftOut.length > 10 ? ` and ${run.leftOut.length - 10} more` : ''}.`
-    : ''
+  const left = run.leftOut.length ? `\n${leftOutLine(run.leftOut)}` : ''
   let done: { isOk: boolean; text: string; activityId?: string }
   try {
     done = await work(run.tree, COPY_NOTE)

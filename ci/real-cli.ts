@@ -26,6 +26,11 @@ import { applyRun, compare, makeCopy, removeRun } from '../hooks/workspace'
 const $ = {
   env: { get: async (name: string) => process.env[name] },
   clock: { now: async () => Date.now() },
+  // the plugin store the workspace copy keeps its runs in, in memory
+  store: (() => {
+    const m = new Map<string, string>()
+    return { get: async (k: string) => (m.has(k) ? JSON.parse(m.get(k)!) : undefined), set: async (k: string, v: unknown) => void m.set(k, JSON.stringify(v)) }
+  })(),
   fs: {
     exists: async (path: string) => existsSync(path),
     read: async (path: string) => readFileSync(path, 'utf8'),

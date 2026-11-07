@@ -93,6 +93,12 @@ type World = {
   applied?: string
   /** run folders the hub removed */
   removed?: string[]
+  /** files the hub's git sees as links (mode 120000), in the folder or made by the run */
+  copyLinks?: string[]
+  /** files the hub's git grep finds a key in */
+  copyKeyed?: string[]
+  /** paths the hub took out of the copy's index */
+  dropped?: string[]
   /** the working tree as it was when the copy was made */
   copyBase?: Record<string, [string, string]>
   /** the relay's exit code (0 when absent) */
@@ -291,10 +297,19 @@ function respond(w: World, run: Run) {
       if (w.copyFails && sub[0] === 'init') return ok('', 'fatal: could not create work tree dir: No space left on device\n', 128)
       if (sub[0] === 'write-tree') {
         w.copyBase = { ...(w.work ?? {}) }
-        return ok('base0tree\n')
+        return ok(`${'b'.repeat(40)}\n`)
       }
-      if (sub[0] === 'ls-files') return ok(sub.includes('-s') ? '' : `${(w.copyFiles ?? ['src/a.ts']).join('\0')}\0`)
-      if (sub[0] === 'diff' && sub.includes('--name-status')) return ok(copyChanges(w).map(([st, f]) => `${st}\0${f}\0`).join(''))
+      if (sub[0] === 'ls-files' && sub.includes('-s')) return ok((w.copyFiles ?? ['src/a.ts']).map(f => `${w.copyLinks?.includes(f) ? '120000' : '100644'} ${'c'.repeat(40)} 0\t${f}`).join('\0') + '\0')
+      if (sub[0] === 'ls-files' && sub.includes('-i')) return ok('')
+      if (sub[0] === 'ls-files') return ok(`${(w.copyFiles ?? ['src/a.ts']).join('\0')}\0`)
+      if (sub[0] === 'update-index') {
+        ;(w.dropped ??= []).push(...(run.stdin ?? '').split('\0').filter(Boolean))
+        return ok('')
+      }
+      if (sub[0] === 'diff' && sub.includes('--raw')) {
+        return ok(copyChanges(w).map(([st, f]) => `:100644 ${w.copyLinks?.includes(f) ? '120000' : '100644'} ${'0'.repeat(40)} ${'1'.repeat(40)} ${st}\0${f}\0`).join(''))
+      }
+      if (sub[0] === 'grep') return w.copyKeyed?.length ? ok(`${w.copyKeyed.join('\0')}\0`) : ok('', '', 1)
       if (sub[0] === 'diff' && sub.includes('--name-only')) return ok((w.copyStale ?? []).map(f => `${f}\0`).join(''))
       if (sub[0] === 'diff' && sub.some(x => x.startsWith('--stat'))) return ok(` ${copyChanges(w).length} files changed\n`)
       if (sub[0] === 'diff') return ok('diff --git a/x b/x\n')
@@ -1788,6 +1803,47 @@ test('a copy that cannot be made refuses the write: nothing is sent', async ($, 
   expect(r).toContain('could not make a copy of C:\\\\proj to work in')
   expect(r).toContain('Write straight into the folder')
   expect(w.ran.some(x => x.argv[1] === 'exec')).toBe(false)
+})
+
+test('links and files with a key inside are left out of the copy; a link the run made is never applied', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.copyFiles = ['src/a.ts', 'out', 'config/prod.json']
+  w.copyLinks = ['out', 'src/link']
+  w.copyKeyed = ['config/prod.json']
+  w.workAfter = { 'src/link': ['??', 'l'] }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Apply']
+  const r = JSON.stringify(await $.tool.call(WRITE as never))
+  expect(w.dropped).toEqual(['out', 'config/prod.json'])
+  expect(r).toContain('with what looks like a key inside: config/prod.json')
+  expect(r).toContain('links and submodules: out')
+  expect(r).toContain('the run made links or submodules, which the hub never applies')
+  expect(r).toContain('- src/link')
+  expect(w.applied).toBeUndefined()
+})
+
+test('a kept run is read from the plugin store, never from a file beside the copy, and a changed record is refused', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Keep for later']
+  const first = JSON.stringify(await $.tool.call(WRITE as never))
+  const id = /run (run-\d+-[0-9a-f]{16})/.exec(first)?.[1] ?? ''
+  expect(Object.keys(w.written ?? {}).some(k => k.endsWith('run.json'))).toBe(false)
+  const runs = w.store['hub-work-runs-v1'] as Record<string, { folder: string }>
+  expect(runs[id]?.folder).toBe('C:\\proj')
+  // someone points the kept run at another folder
+  w.store['hub-work-runs-v1'] = { ...runs, [id]: { ...runs[id]!, folder: 'C:\\other' } }
+  w.answers = ['Apply']
+  const later = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__apply_changes', run: id } as never))
+  expect(later).toContain('No kept changes with run id')
+  expect(w.applied).toBeUndefined()
 })
 
 test('a run that changes nothing asks nothing more, and secret files are left out of the copy by name', async ($, on) => {
