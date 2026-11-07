@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.4
+
+Security fixes:
+
+- **A delegation cannot commit or push:** `delegate_ai` runs the relay with git config set through the environment, so every git the agent starts refuses any change to git refs (commit, branch, stash, merge, reset, fetch), even with `--no-verify`, and sends every push to a remote helper that does not exist. `status`, `diff` and `add` still work.
+- **Checked afterwards:** the hub reads every ref (HEAD, branches, tags, remote-tracking refs) itself before and after the delegation. If any changed, the result is refused with what changed and, where it applies, the `git reset --soft` that keeps the work as uncommitted changes. The hub never undoes anything itself. A push that got past the guard cannot be seen from the local refs, so check the remote yourself if the result says refs changed.
+- While a delegation runs, the repository's own git hooks (such as husky) do not run.
+
 ## 0.9.3
 
 Security fixes:

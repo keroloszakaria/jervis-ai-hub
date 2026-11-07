@@ -1,6 +1,6 @@
 {
   "name": "ai-subscriptions",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Jervis AI Hub: connect your ChatGPT (Codex), Antigravity, DeepSeek and other AI subscriptions and keys, pick model and effort, route, compare and review activity",
   "author": { "name": "Kerolos Zakaria" },
   "license": "MIT",

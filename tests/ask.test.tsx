@@ -4,6 +4,7 @@ import { classifyError, mayFallBack, timeoutFor } from '../hooks/cli'
 import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
 import { redactKeys, snipWords } from '../hooks/activity'
+import { parseRefs, refChanges, undoHint } from '../hooks/gitguard'
 import { duration, size } from '../hooks/requests'
 import { effortForLevel, levelTag, rate } from '../hooks/levels'
 import type { ModelInfo } from '../types'
@@ -71,6 +72,11 @@ type World = {
   /** npm shims on PATH instead of the installed CLIs */
   shims?: Record<string, string>
   files?: Record<string, string>
+  /** commands found on PATH directly (where/which), by name */
+  paths?: Record<string, string>
+  /** the repository's refs as git reports them; the relay run switches to `gitAfter` */
+  git?: { head: string; branch?: string; refs: Record<string, string> }
+  gitAfter?: { head: string; branch?: string; refs: Record<string, string> }
 }
 
 /** reads a PowerShell -EncodedCommand back into its script (UTF-16LE, base64) */
@@ -203,7 +209,18 @@ function respond(w: World, run: Run) {
     const e = { argv: run.argv }
     w.ran.push(run)
     const a = e.argv.join(' ')
+    if ((e.argv[0] === 'where' || e.argv[0] === 'which') && w.paths?.[e.argv[1] ?? '']) return ok(`${w.paths[e.argv[1]!]}\n`)
     if ((e.argv[0] === 'where' || e.argv[0] === 'which') && w.shims?.[e.argv[1] ?? '']) return ok(`${w.shims[e.argv[1]!]}\n`)
+    if (e.argv[0] === 'git' && w.git) {
+      const g = w.git
+      const sub = e.argv.slice(3).join(' ')
+      if (sub === 'rev-parse --is-inside-work-tree') return ok('true\n')
+      if (sub.startsWith('rev-parse --verify')) return ok(`${g.head}\n`)
+      if (sub.startsWith('symbolic-ref')) return g.branch ? ok(`${g.branch}\n`) : ok('', '', 1)
+      if (sub.startsWith('for-each-ref')) return ok(Object.entries(g.refs).map(([r, s]) => `${s} ${r}`).join('\n'))
+    }
+    // the relay: from here on git reports what the agent left
+    if (e.argv.includes('--brief') && w.gitAfter) w.git = w.gitAfter
     if (e.argv[0] === 'where' || e.argv[0] === 'which') return ok('', 'not found', 1)
     if (e.argv[0] === 'uname') return ok('Darwin\n')
     if (e.argv[0] === 'osascript') return ok(`${SECRET}\n`)
@@ -1229,4 +1246,81 @@ test('redactKeys strips key shapes and exact secrets, and leaves ordinary text',
   expect(redactKeys('Authorization: Bearer abcdefghijklmnop1234')).toBe('Authorization: [redacted]')
   expect(redactKeys('the value is plainsecret99', ['plainsecret99'])).toBe('the value is [redacted]')
   expect(redactKeys(`commit ${SHA}, token: refresh it`)).toBe(`commit ${SHA}, token: refresh it`)
+})
+
+// Git protection in delegate_ai
+const A = 'a'.repeat(40)
+const B = 'b'.repeat(40)
+const REPO = () => ({ head: A, branch: 'main', refs: { 'refs/heads/main': A, 'refs/remotes/origin/main': A } })
+const DELEGATE = (w: World) => {
+  w.paths = { node: 'C:\\node\\node.exe' }
+  w.git = REPO()
+  w.answer = 'Allow'
+}
+
+test('a delegation runs with git refs locked and pushes sent nowhere', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix the bug', repo: 'C:\\proj' } as never))
+  expect(r).toContain('relay completed')
+  const relay = w.ran.find(x => x.argv.includes('--brief'))!
+  expect(relay.env?.GIT_CONFIG_COUNT).toBe('2')
+  expect(relay.env?.GIT_CONFIG_KEY_0).toBe('core.hooksPath')
+  expect(relay.env?.GIT_CONFIG_VALUE_0).toBe('C:/Temp/jervis-ai-hub/git-guard')
+  expect(relay.env?.GIT_CONFIG_KEY_1).toBe('url.jervis-blocked://.pushInsteadOf')
+  expect(relay.env?.GIT_CONFIG_VALUE_1).toBe('')
+  // the hook that refuses every ref change, which --no-verify does not skip
+  const hook = w.written?.['C:\\Temp\\jervis-ai-hub\\git-guard\\reference-transaction'] ?? ''
+  expect(hook).toContain('[ "$1" = prepared ]')
+  expect(hook).toContain('exit 1')
+  expect(Object.keys(w.written ?? {}).some(k => k.endsWith('git-guard\\pre-push'))).toBe(true)
+  // the brief says so too
+  const brief = Object.entries(w.written ?? {}).find(([k]) => k.includes('briefs'))?.[1] ?? ''
+  expect(brief).toContain('Git refs are locked')
+})
+
+test('a delegation that commits anyway is refused, with what changed and how to undo it', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.gitAfter = { head: B, branch: 'main', refs: { 'refs/heads/main': B, 'refs/remotes/origin/main': A, 'refs/heads/side': B } }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'fix the bug', repo: 'C:\\proj' } as never))
+  expect(r).toContain('deny')
+  expect(r).toContain('git refs changed')
+  expect(r).toContain('HEAD moved from aaaaaaa to bbbbbbb')
+  expect(r).toContain('refs/heads/side was created at bbbbbbb')
+  expect(r).toContain(`git reset --soft ${A}`)
+  expect(r).toContain('The hub undid nothing')
+  // the hub only read: no reset, checkout or push of its own
+  expect(w.ran.some(x => x.argv[0] === 'git' && /reset|checkout|push|update-ref/.test(x.argv.join(' ')))).toBe(false)
+})
+
+test('outside a git repository a delegation runs without the guard', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.git = undefined
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'chatgpt', brief: 'b', repo: 'C:\\proj' } as never))
+  expect(r).toContain('relay completed')
+  expect(w.ran.find(x => x.argv.includes('--brief'))?.env?.GIT_CONFIG_COUNT).toBeUndefined()
+})
+
+test('ref changes are named one by one', () => {
+  const before = { isRepo: true, head: A, branch: 'main', refs: parseRefs([`${A} refs/heads/main`, `${A} refs/tags/v1`, ''].join('\n')) }
+  expect(refChanges(before, before)).toEqual([])
+  const after = { isRepo: true, head: A, branch: 'side', refs: parseRefs([`${A} refs/heads/main`, `${B} refs/heads/side`].join('\r\n')) }
+  expect(refChanges(before, after)).toEqual([
+    'HEAD switched from main to side',
+    'refs/tags/v1 was deleted (it was aaaaaaa)',
+    'refs/heads/side was created at bbbbbbb',
+  ])
+  // switching branches leaves nothing for reset --soft to do safely
+  expect(undoHint(before, after)).toBeUndefined()
 })

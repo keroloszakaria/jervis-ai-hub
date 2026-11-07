@@ -7,6 +7,7 @@ import type { EngineInterface } from 'claude-code'
 
 import { begin, finish, redact, redactKeys } from './activity'
 import { clean, dirOf, errText, exe, onPath } from './cli'
+import { guardEnv, refChanges, snapshot, undoHint } from './gitguard'
 import { resolveModel } from './models'
 import { provider } from './registry'
 import { readiness } from './requests'
@@ -66,14 +67,22 @@ export async function delegate(
   const stamp = await $.clock.now()
   const briefPath = joinPath(os, await tempDir($), 'jervis-ai-hub', 'briefs', `brief-${stamp}.md`)
   const guard =
-    '\n\nRules from the orchestrator: do not commit, do not push, keep changes inside this repository, and report what you changed.\n'
+    '\n\nRules from the orchestrator: do not commit, do not push, keep changes inside this repository, and report what you changed. ' +
+    'Git refs are locked while you work: commit, branch, stash, merge, reset, fetch and push will fail. Leave every change uncommitted for review.\n'
   await $.fs.write(briefPath, brief + guard)
+
+  // the refs as they are before anything runs, read by the hub's own git
+  const before = await snapshot($, repo)
 
   // The relay finds the CLI on PATH; a stale shim there must not shadow the working build.
   const cli = await exe($, p.kind)
   const pathVar = (await $.env.get('PATH')) ?? (await $.env.get('Path')) ?? ''
   const sep = pathSep(os)
-  const env = cli ? { PATH: `${dirOf(cli)}${sep}${pathVar}`, ...(os === 'windows' ? { Path: `${dirOf(cli)}${sep}${pathVar}` } : {}) } : undefined
+  const env = {
+    ...(cli ? { PATH: `${dirOf(cli)}${sep}${pathVar}`, ...(os === 'windows' ? { Path: `${dirOf(cli)}${sep}${pathVar}` } : {}) } : {}),
+    // every git the relay and its agent start refuses ref changes and pushes
+    ...(before.isRepo ? await guardEnv($, os) : {}),
+  }
   const c = (await read($, config))[id]
   const pick = resolveModel((await read($, models))[id]?.models, c?.model, c?.effort)
   // the relay takes a model id only: an effort the CLI encodes in the id (Antigravity) goes through it
@@ -106,10 +115,35 @@ export async function delegate(
       // reported below without it
     }
   }
-  const git = (result?.git ?? {}) as { touchedFiles?: unknown }
+  const git = (result?.git ?? {}) as { touchedFiles?: unknown; commitViolation?: unknown }
   const touched = Array.isArray(git.touchedFiles) ? git.touchedFiles.filter((f): f is string => typeof f === 'string') : undefined
-  const status = typeof result?.status === 'string' ? result.status : code === 0 ? 'completed' : 'failed'
   const final = typeof result?.finalMessage === 'string' ? redactKeys(result.finalMessage) : ''
+
+  // the hub's own check, whatever the relay reports: did any ref change?
+  const after = await snapshot($, repo)
+  const changed = refChanges(before, after)
+  if (git.commitViolation === true && !changed.length) changed.push('the relay reports that HEAD changed')
+  const files = touched?.length ? `\nFiles changed (review before committing):\n${touched.map(f => `- ${f}`).join('\n')}` : '\nNo files changed.'
+  if (changed.length) {
+    const undo = undoHint(before, after)
+    const why = `git refs changed during the delegation: ${changed.join('; ')}`
+    await finish($, actId, { state: 'error', ms, touchedFiles: touched, resultPreview: final, error: why })
+    return {
+      isOk: false,
+      status: 'git-changed',
+      touchedFiles: touched,
+      resultPath,
+      text: [
+        `${p.label} relay ran for ${Math.round(ms / 1000)}s, but git refs changed, which a delegation must never do. The hub undid nothing.`,
+        ...changed.map(c => `- ${c}`),
+        ...(undo ? [undo] : []),
+        'A push cannot be undone from here: check the remote yourself.',
+        files.trim(),
+      ].join('\n'),
+    }
+  }
+
+  const status = typeof result?.status === 'string' ? result.status : code === 0 ? 'completed' : 'failed'
   const isOk = status === 'completed'
   await finish($, actId, {
     state: isOk ? 'ok' : 'error',
@@ -118,7 +152,6 @@ export async function delegate(
     resultPreview: final,
     error: isOk ? undefined : redact(clean(stderr).slice(-600)),
   })
-  const files = touched?.length ? `\nFiles changed (review before committing):\n${touched.map(f => `- ${f}`).join('\n')}` : '\nNo files changed.'
   return {
     isOk,
     status,
