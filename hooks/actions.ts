@@ -264,8 +264,21 @@ function changeLines(c: Compared, max = 50): string {
   return `${lines.join('\n')}${c.changes.length > max ? `\n- and ${c.changes.length - max} more` : ''}`
 }
 
-/** Asks the person about a run's changes and does what they say. */
-async function decide($: EngineInterface, run: WorkRun, c: Compared): Promise<ToolAnswer> {
+/** One review at a time: the pane shows one run, and each answer goes to its own run. */
+let reviews: Promise<unknown> = Promise.resolve()
+
+/** Asks the person about a run's changes and does what they say, after any review before it. */
+function decide($: EngineInterface, run: WorkRun, c: Compared): Promise<ToolAnswer> {
+  const turn = reviews.then(() => decideNow($, run, c))
+  reviews = turn.catch(() => undefined)
+  return turn
+}
+
+async function decideNow($: EngineInterface, run: WorkRun, c: Compared): Promise<ToolAnswer> {
+  // a review that waited may find its run already applied or discarded by the one before
+  if (!(await $.fs.exists(run.git).catch(() => false))) {
+    return { isOk: false, text: `Run ${run.id} was already applied or discarded while it waited; nothing more was done.` }
+  }
   const label = provider(run.provider)?.label ?? run.provider
   const n = c.changes.length
   const stat = c.stat.split('\n').slice(0, 21).join('\n')
@@ -290,15 +303,12 @@ async function decide($: EngineInterface, run: WorkRun, c: Compared): Promise<To
   if (answer === 'keep') return { isOk: true, text: `Kept for later, not applied (run ${run.id}). ${later}\n${changeLines(c)}` }
   const r = await applyRun($, run, c)
   if (!r.isOk) {
-    return { isOk: false, text: `Not applied: ${r.why}${r.files?.length ? `:\n${r.files.map(p => `- ${p}`).join('\n')}` : '.'}\nThe changes are kept (run ${run.id}). ${later}` }
+    const files = r.files?.length ? `:\n${r.files.map(p => `- ${p}`).join('\n')}` : '.'
+    return { isOk: false, text: `${r.isMixed ? 'Partly applied' : 'Not applied'}: ${r.why}${files}\nThe changes are kept (run ${run.id}). ${later}` }
   }
   await removeRun($, run.root)
-  const merged = r.alsoChanged?.length
-    ? `\nThese files also had other changes made in the folder meanwhile; git kept both, so check them:\n${r.alsoChanged.map(p => `- ${p}`).join('\n')}`
-    : r.unchecked
-      ? `\nThe hub could not check the files after applying (${r.unchecked}).`
-      : ''
-  return { isOk: true, text: `Applied to ${run.shown}, not staged or committed (review before committing):\n${changeLines(c)}${merged}` }
+  const unchecked = r.unchecked ? `\nThe hub could not check the files after applying (${r.unchecked}).` : ''
+  return { isOk: true, text: `Applied to ${run.shown}, not staged or committed (review before committing):\n${changeLines(c)}${unchecked}` }
 }
 
 /** apply_changes: a kept run's changes put to the person again. */

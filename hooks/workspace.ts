@@ -427,11 +427,11 @@ async function differsFrom($: EngineInterface, run: WorkRun, tree: string, chang
 }
 
 /**
- * `alsoChanged`: files that, once applied, differ from the run's version: a
- * change made in the folder meanwhile that git merged with the run's; both
- * are in the file. `unchecked`: why that check could not run.
+ * `unchecked`: why the check after the apply could not run. `isMixed`: the
+ * run's changes could not be taken back out of files that changed meanwhile,
+ * so those files hold both.
  */
-export type Applied = { isOk: true; alsoChanged?: string[]; unchecked?: string } | { isOk: false; why: string; files?: string[] }
+export type Applied = { isOk: true; unchecked?: string } | { isOk: false; why: string; files?: string[]; isMixed?: true }
 
 /**
  * Writes the run's changes into the folder, only when none of its files
@@ -452,13 +452,26 @@ export async function applyRun($: EngineInterface, run: WorkRun, c: Compared): P
   } catch (error) {
     return { isOk: false, why: `${errText(error)}; nothing was applied` }
   }
-  // each file as the run left it? one that is not had another change merged in
+  // each file as the run left it? one that is not had another change merged in:
+  // what was approved is the run's version, so the run's changes come back out
+  let merged: string[]
   try {
-    const alsoChanged = await differsFrom($, run, c.after, c.changes, x => x.status === 'D')
-    return alsoChanged.length ? { isOk: true, alsoChanged } : { isOk: true }
+    merged = await differsFrom($, run, c.after, c.changes, x => x.status === 'D')
   } catch (error) {
     return { isOk: true, unchecked: errText(error) }
   }
+  if (!merged.length) return { isOk: true }
+  await sealGit($, run.git)
+  const back = await hubGit($, run.git, run.folder, ['apply', '-R', '--binary', '--whitespace=nowarn', c.patchPath], { cwd: run.folder })
+  if (back.code !== 0) {
+    return {
+      isOk: false,
+      isMixed: true,
+      why: `these files changed in the folder while the changes were applied, and the hub could not take the run's changes back out (${(back.err || back.out).trim().slice(0, 200)}): they hold both, so check them`,
+      files: merged,
+    }
+  }
+  return { isOk: false, why: "these files changed in the folder while the changes were applied, so the run's changes were taken back out; the folder keeps the other changes", files: merged }
 }
 
 async function storedRuns($: EngineInterface): Promise<Record<string, RunRecord>> {
@@ -556,7 +569,15 @@ export async function removeRun($: EngineInterface, path: string): Promise<void>
   await rmTree($, os, path)
 }
 
-/** Kept runs older than a week are removed (called as a session starts), with records left without a folder. */
+/** A copy still being made, in this session or another, is left this long before it counts as left behind. */
+export const LEFT_BEHIND_MS = 10 * 60 * 1000
+
+/**
+ * Called as a session starts. Removes kept runs older than a week, and,
+ * once older than a few minutes, what a failed copy left behind: a scan
+ * (which holds every file read) and a run with no record. Then drops records
+ * left without a folder.
+ */
 export async function cleanOldRuns($: EngineInterface, now: number, maxAgeMs = 7 * 24 * 60 * 60 * 1000): Promise<void> {
   const os = await osName($)
   const root = await workRoot($)
@@ -566,10 +587,18 @@ export async function cleanOldRuns($: EngineInterface, now: number, maxAgeMs = 7
   } catch {
     entries = []
   }
+  const recorded = await storedRuns($)
   for (const e of entries) {
     const m = RUN_ID.exec(e.name)
     if (!m || e.kind !== 'dir') continue
-    if (now - Number(m[1]) > maxAgeMs) await removeRun($, joinPath(os, root, e.name))
+    const age = now - Number(m[1])
+    const dir = joinPath(os, root, e.name)
+    if (age > maxAgeMs || (age > LEFT_BEHIND_MS && !(e.name in recorded))) {
+      await removeRun($, dir)
+      continue
+    }
+    const scan = joinPath(os, dir, 'scan')
+    if (age > LEFT_BEHIND_MS && (await $.fs.exists(scan).catch(() => false))) await rmTree($, os, scan)
   }
   const all = await storedRuns($)
   const there = new Set(entries.map(e => e.name))

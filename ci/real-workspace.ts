@@ -7,7 +7,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { applyRun, changedSince, cleanOldRuns, compare, isLeftOut, makeCopy, readRun, removeRun } from '../hooks/workspace'
+import { LEFT_BEHIND_MS, applyRun, changedSince, cleanOldRuns, compare, isLeftOut, makeCopy, readRun, removeRun } from '../hooks/workspace'
 
 const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'hub-workspace-')))
 const home = join(root, 'home')
@@ -18,6 +18,8 @@ const store = new Map<string, unknown>()
 let beforeApply: (() => void) | undefined
 // and one run just before the hub stores the files in a run's own git (not the scan's)
 let beforeStore: (() => void) | undefined
+// removals that fail, as on a locked file: the path is left as it is
+let failRemove: ((path: string) => boolean) | undefined
 
 // the few engine calls the copy makes, answered by this process; home is a throwaway folder
 const $ = {
@@ -39,6 +41,8 @@ const $ = {
   },
   process: {
     run: async (argv: string[], opts?: { timeoutMs?: number; stdin?: string; cwd?: string; env?: Record<string, string> }) => {
+      const target = argv[argv.length - 1] ?? ''
+      if ((argv[0] === 'rm' || argv.includes('rmdir')) && failRemove?.(target)) return { exitCode: 1, stdout: '', stderr: 'locked' }
       if (argv.includes('apply') && beforeApply) {
         beforeApply()
         beforeApply = undefined
@@ -229,7 +233,7 @@ async function main(): Promise<void> {
     check("the review has each file's diff", Boolean(fa && fa.text.includes('-two') && fa.text.includes('+TWO') && fa.added === 1 && fa.deleted === 1), JSON.stringify(c9.files))
     check('a binary file is named as one, with no text', Boolean(fb && fb.isBinary && fb.text === '' && fb.status === 'A'), JSON.stringify(fb))
 
-    // an apply onto a file that, meanwhile, changed elsewhere in it: git keeps both, and the hub says so
+    // an apply onto a file that, meanwhile, changed elsewhere in it: the run's changes come back out, the other change stays
     const merge = join(root, 'merge')
     mkdirSync(merge)
     writeFileSync(join(merge, 'm.txt'), `${Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n')}\n`)
@@ -240,15 +244,51 @@ async function main(): Promise<void> {
     const r10 = await applyRun($, run10, c10)
     const m = readFileSync(join(merge, 'm.txt'), 'utf8')
     check(
-      'a change made meanwhile in another part of the file is kept with the run\'s, and named',
-      r10.isOk && 'alsoChanged' in r10 && (r10.alsoChanged ?? []).includes('m.txt') && m.includes('line 2 (run)') && m.includes('line 27 (person)'),
-      JSON.stringify(r10),
+      "a change made meanwhile elsewhere in a file: the run's changes are taken back out, the other change stays, and the file is named",
+      !r10.isOk && !('isMixed' in r10) && (r10.files ?? []).includes('m.txt') && !m.includes('line 2 (run)') && m.includes('line 27 (person)'),
+      JSON.stringify({ r10, m }),
     )
+    // so a run that changes two files leaves neither applied
+    writeFileSync(join(merge, 'n.txt'), 'n\n')
+    const run12 = await makeCopy($, { folder: merge, shown: merge, provider: 'chatgpt' })
+    writeFileSync(join(run12.tree, 'n.txt'), 'N\n')
+    writeFileSync(join(run12.tree, 'm.txt'), readFileSync(join(run12.tree, 'm.txt'), 'utf8').replace('line 3\n', 'line 3 (run)\n'))
+    const c12 = await compare($, run12)
+    beforeApply = () => writeFileSync(join(merge, 'm.txt'), readFileSync(join(merge, 'm.txt'), 'utf8').replace('line 20\n', 'line 20 (person)\n'))
+    const r12 = await applyRun($, run12, c12)
+    check('and every file of that run is taken back out, not only the merged one', !r12.isOk && readFileSync(join(merge, 'n.txt'), 'utf8') === 'n\n', JSON.stringify(r12))
+    await removeRun($, run12.root)
     // and an apply with nothing else changed names nothing
     const run11 = await makeCopy($, { folder: merge, shown: merge, provider: 'chatgpt' })
     writeFileSync(join(run11.tree, 'm.txt'), readFileSync(join(run11.tree, 'm.txt'), 'utf8').replace('line 5\n', 'line 5 (run)\n'))
     const r11 = await applyRun($, run11, await compare($, run11))
-    check('a clean apply names no other changes', r11.isOk && !('alsoChanged' in r11) && !('unchecked' in r11), JSON.stringify(r11))
+    check('a clean apply is applied, with nothing to report', r11.isOk && !('unchecked' in r11) && readFileSync(join(merge, 'm.txt'), 'utf8').includes('line 5 (run)'), JSON.stringify(r11))
+
+    // a scan that cannot be removed refuses the copy; what it left is removed at the next start, once old enough
+    const work = join(home, '.claude', 'jervis-ai-hub', 'work')
+    const runsBefore = new Set(readdirSync(work))
+    failRemove = path => path.includes(`${join('jervis-ai-hub', 'work')}`)
+    let scanRefused = ''
+    try {
+      await makeCopy($, { folder: plain, shown: plain, provider: 'chatgpt' })
+    } catch (error) {
+      scanRefused = String(error)
+    }
+    failRemove = undefined
+    const leftBehind = readdirSync(work).filter(n => !runsBefore.has(n))
+    check('a scan that cannot be removed refuses the copy', scanRefused.includes('could not be removed') && leftBehind.length === 1, `${scanRefused} ${leftBehind.join(',')}`)
+    const stuck = join(work, leftBehind[0] ?? 'none')
+    check('control: the failed copy left its scan behind', existsSync(join(stuck, 'scan')))
+    await cleanOldRuns($, Date.now())
+    check('a copy left behind just now is not touched (it may still be in the making)', existsSync(join(stuck, 'scan')))
+    // a kept run with a scan still in it: the scan goes, the run stays
+    const run13 = await makeCopy($, { folder: plain, shown: plain, provider: 'chatgpt' })
+    mkdirSync(join(run13.root, 'scan'))
+    writeFileSync(join(run13.root, 'scan', 'x'), 'x')
+    await cleanOldRuns($, Date.now() + LEFT_BEHIND_MS + 60_000)
+    check('once old enough, a copy with no record is removed', !existsSync(stuck))
+    check("and a kept run's leftover scan goes, while the run stays", !existsSync(join(run13.root, 'scan')) && existsSync(run13.tree) && (await readRun($, run13.id)) !== undefined)
+    await removeRun($, run13.root)
 
     // links: a link in the folder that leads out is not copied, and a link the run makes is never applied
     const linked = join(root, 'linked')

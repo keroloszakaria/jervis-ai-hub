@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.5
+
+Review and apply, finished:
+
+- **One review at a time:** when two runs end together, the second question and its Review changes pane wait for the first answer, so the pane never shows one run while you answer for another.
+- **Strict apply:** a file changed in the folder while the changes were applied would hold both changes. The hub now takes the run's changes back out of every file, keeps the other change, names the file and keeps the run. 0.10.4 kept both and named the file.
+- **What a failed copy leaves is cleaned up:** a scan that cannot be removed refuses the copy. At the next session start, anything more than ten minutes old is removed: a leftover scan, or a run folder with no record. A copy still being made in another session is left alone.
+- **Checked with real git:** a merged change taken back out of every file of the run, a removal that fails, and the clean-up that follows. In the tests: two runs that end together are reviewed one after the other.
+
 ## 0.10.4
 
 Review and integrity:

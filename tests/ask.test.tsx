@@ -49,6 +49,12 @@ type World = {
   session?: string
   /** answers to the next questions, in order; then `answer` */
   answers?: string[]
+  /** answers by question, for questions whose order is not fixed */
+  answerBy?: (question: string) => string | undefined
+  /** the review pane's opens and closes, in order */
+  paneLog?: string[]
+  /** a `git apply -R` the hub ran */
+  reversed?: string
   /** the provider CLI never answers (until stopped) */
   hang?: boolean
   instantTimeout?: boolean
@@ -168,10 +174,12 @@ function engine(on: any, w: World) {
   on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__ai-subscriptions__${e.name}` } }))
   on('ui.open', (_: unknown, e: { id: string }) => {
     ;(w.opened ??= []).push(e.id)
+    if (e.id === 'ai-subscriptions-review') (w.paneLog ??= []).push('open')
     return { value: w.paneUnplaced && e.id !== 'ai-subscriptions' ? { isPlaced: false, reason: 'no surface' } : { isPlaced: true } }
   })
   on('ui.close', (_: unknown, e: { id: string }) => {
     ;(w.closed ??= []).push(e.id)
+    if (e.id === 'ai-subscriptions-review') (w.paneLog ??= []).push('close')
     return { value: undefined }
   })
   on('ui.toast', (_: unknown, e: { text?: string; message?: string }) => {
@@ -227,7 +235,7 @@ function engine(on: any, w: World) {
   on('tool.call', { tool: 'AskUserQuestion' }, (_: unknown, e: { questions: { question: string }[] }) => {
     const q = e.questions[0]?.question ?? ''
     w.asked.push(q)
-    return { result: { questions: e.questions, answers: { [q]: w.answers?.shift() ?? w.answer } } }
+    return { result: { questions: e.questions, answers: { [q]: w.answerBy?.(q) ?? w.answers?.shift() ?? w.answer } } }
   })
   on('process.run', (_: unknown, e: { argv: string[]; init?: { cwd?: string; env?: Record<string, string>; stdin?: string } }) =>
     respond(w, { argv: [...e.argv], cwd: e.init?.cwd, env: e.init?.env, stdin: e.init?.stdin }),
@@ -350,6 +358,10 @@ function respond(w: World, run: Run) {
       if (sub[0] === 'diff' && sub.includes('--name-only')) return ok(((w.readTree === 'a'.repeat(40) ? w.copyMerged : w.copyStale) ?? []).map(f => `${f}\0`).join(''))
       if (sub[0] === 'diff' && sub.some(x => x.startsWith('--stat'))) return ok(` ${copyChanges(w).length} files changed\n`)
       if (sub[0] === 'diff') return ok('diff --git a/x b/x\n')
+      if (sub[0] === 'apply' && sub.includes('-R')) {
+        w.reversed = run.cwd ?? ''
+        return ok('')
+      }
       if (sub[0] === 'apply') {
         w.applied = run.cwd ?? ''
         return ok('')
@@ -1844,7 +1856,7 @@ test('with no pane drawn, the question carries a few diffs itself', async ($, on
   expect(q).not.toContain('Review changes pane')
 })
 
-test('an apply names the files that also had other changes merged in', async ($, on) => {
+test("an apply that merged another change takes the run's changes back out and keeps the run", async ($, on) => {
   const w = world(LEGACY())
   DELEGATE(w)
   w.workAfter = { 'src/x.ts': [' M', 'x2'] }
@@ -1855,8 +1867,28 @@ test('an apply names the files that also had other changes merged in', async ($,
   w.answers = ['Allow', 'Apply']
   const r = JSON.stringify(await $.tool.call(WRITE as never))
   expect(w.applied).toBe('C:\\proj')
-  expect(r).toContain('also had other changes made in the folder meanwhile')
+  expect(w.reversed).toBe('C:\\proj')
+  expect(r).toContain('Not applied')
+  expect(r).toContain("the run's changes were taken back out")
   expect(r).toContain('- src/x.ts')
+  expect(r).toContain('The changes are kept (run run-')
+})
+
+test('two runs that end together are reviewed one after the other, each with its own pane', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  w.answerBy = q => (q.includes('Apply these changes') ? 'Keep for later' : 'Allow')
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const [a, b] = await Promise.all([$.tool.call(WRITE as never), $.tool.call({ ...WRITE, prompt: 'another fix' } as never)])
+  expect(JSON.stringify(a)).toContain('Kept for later')
+  expect(JSON.stringify(b)).toContain('Kept for later')
+  // never two reviews open at once
+  expect(w.paneLog).toEqual(['open', 'close', 'open', 'close'])
+  const ids = [a, b].map(x => /run (run-\d+-[0-9a-f]{16})/.exec(JSON.stringify(x))?.[1])
+  expect(ids[0]).not.toBe(ids[1])
 })
 
 test("a run another session kept applies only to this session's folder", async ($, on) => {
