@@ -7,8 +7,10 @@ import type { EngineInterface } from 'claude-code'
 import type { ActivityType, Mode, Task, Usage } from '../types'
 import { begin, finish, redact, redactKeys } from './activity'
 import { revealForRequest } from './auth'
-import { ERROR_LABEL, type ErrorKind, MAX_ARG_PROMPT, argvOf, classifyError, errText, exe, invocation, isolationProblem, parse, parseOpencodeExport, sandboxDir, timeoutFor } from './cli'
+import { ERROR_LABEL, type ErrorKind, MAX_ARG_PROMPT, argvOf, classifyError, codexIsolation, errText, exe, invocation, isolationProblem, parse, parseOpencodeExport, sandboxDir, timeoutFor } from './cli'
 import { resolveModel } from './models'
+import { osName } from './platform'
+import type { OsName } from './platform'
 import { sessionKey } from './permissions'
 import { provider } from './registry'
 import { DEFAULT_SETTINGS, setHealth } from './state'
@@ -229,6 +231,19 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
   // rules the hub cannot confirm for this version are no rules at all: refuse
   const unconfined = await isolationProblem($, p.kind, path, a.mode)
   if (unconfined) return fail(unconfined)
+  // Codex: its sandbox must hold the run to its folder, unless the person chose otherwise
+  let codexOs: OsName | undefined
+  let unisolated = ''
+  if (p.kind === 'codex') {
+    const iso = await codexIsolation($, path)
+    if (iso.isOk) codexOs = await osName($)
+    else if ((await read($, settings)).allowCodexUnisolated) unisolated = `Ran without read isolation: ${iso.why}. Codex could read any file your account can.`
+    else {
+      return fail(
+        `Refused: ${iso.why}, so Codex would not be held to its folder. Nothing was sent. Codex needs its MXC sandbox on Windows (Windows 11 24H2 or 25H2 with the update that adds it); or turn on "Allow Codex without read isolation" in Jervis AI Hub → Settings → Privacy.`,
+      )
+    }
+  }
 
   const id = await begin($, {
     type: a.type,
@@ -251,7 +266,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
       if (!secret) throw new Error('the saved API key could not be read from this account’s secure storage; connect it again')
       env = { [p.envVar]: secret }
     }
-    const inv = invocation(p.kind, path, a.prompt, a.mode, pick.cliModel, pick.effortArg)
+    const inv = invocation(p.kind, path, a.prompt, a.mode, pick.cliModel, pick.effortArg, codexOs)
     const { argv, stdin } = inv
     // the CLI's own limits for this mode (OpenCode's permissions), then the key
     const runDir = a.cwd ?? (await sandboxDir($))
@@ -287,7 +302,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     const errorKind = parsed.isOk ? undefined : classifyError(parsed.error ?? '')
     // a successful answer is cleaned too: a model may echo the key it was given
     const text = parsed.isOk
-      ? redactKeys(parsed.text, secrets)
+      ? `${unisolated ? `(${unisolated})\n\n` : ''}${redactKeys(parsed.text, secrets)}`
       : redact(`${p.label} failed (${ERROR_LABEL[errorKind ?? 'unknown']}): ${parsed.error ?? 'unknown error'}`, secrets)
     await finish(
       $,

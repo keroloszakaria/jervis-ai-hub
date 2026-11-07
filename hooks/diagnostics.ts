@@ -3,7 +3,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { DiagRow, Kind } from '../types'
 import { secureStorageStatus } from './auth'
-import { argvOf, clean, errText, exe, onPath, versionNote } from './cli'
+import { argvOf, clean, codexIsolation, errText, exe, onPath, versionNote } from './cli'
 import { delegationSupport } from './delegation'
 import { setUi } from './state'
 
@@ -33,6 +33,11 @@ export async function runDiagnostics($: EngineInterface): Promise<void> {
     const v = await version($, path)
     const note = versionNote(kind, v)
     rows.push({ name, isOk: !note?.startsWith('refused'), detail: `${v}${note ? ` (${note})` : ''} · ${path}` })
+    if (kind === 'codex') {
+      // the probe runs commands in Codex's sandbox only: no model, nothing sent
+      const iso = await codexIsolation($, path)
+      rows.push({ name: 'Codex read isolation', isOk: iso.isOk, detail: iso.isOk ? 'held to its folder (checked on this machine)' : `${iso.why}: Codex is refused unless allowed in Privacy` })
+    }
   }
   const shim = await $.process.run(['where', 'codex'], { timeoutMs: 10_000 }).catch(() => undefined)
   const shimPath = shim?.stdout.split(/\r?\n/).find(l => /\.cmd$/i.test(l.trim()))

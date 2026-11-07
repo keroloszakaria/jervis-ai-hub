@@ -1479,6 +1479,13 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
           onPress={() => void saveSettings($, s => ({ ...s, allowUnboundedWrites: s.allowUnboundedWrites !== true }))}
         />
         <Toggle
+          id="codex-unisolated"
+          on={st.allowCodexUnisolated === true}
+          label="Allow Codex without read isolation"
+          hint="When Codex's sandbox cannot hold it to the folder here (Windows without MXC), Codex is refused. With this on it runs, and can read any file your account can."
+          onPress={() => void saveSettings($, s => ({ ...s, allowCodexUnisolated: s.allowCodexUnisolated !== true }))}
+        />
+        <Toggle
           id="previews"
           on={st.recordPreviews}
           label="Keep redacted prompt previews"

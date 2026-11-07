@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+
+Codex reads are held to the folder:
+
+- **Codex runs under the hub's permission profile:** each request runs with a profile of the hub's own (`hubread` or `hubwrite`) that denies the filesystem except Codex's minimal system files and the run's folder. On Windows it runs in Codex's MXC sandbox, the one that can deny reads. Checked with the real Codex on Windows 11: a read outside the folder is now denied, where 0.9.11's check failed; all five Codex checks pass.
+- **A probe before the first request, and Codex is refused if it fails:** on each Codex build the hub runs `codex sandbox` with each profile (commands only, no model, nothing sent). Each must read a file in its folder and must not read one outside it. When the check fails or cannot run (no MXC, an older Windows), the Codex request is refused before anything is sent.
+- **"Allow Codex without read isolation"** in Settings → Privacy runs Codex in its older sandbox instead, which stops writes outside the folder but not reads. The answer says it ran so.
+- **Diagnostics shows Codex read isolation:** held, or why not.
+- Requests that start together share one probe.
+- **Not yet:** Codex delegations through the relay keep the relay's own sandbox and are not read-isolated. Writes still edit your working tree; the workspace copy is the next step (`docs/design/0.10.0-isolation.md`).
+
 ## 0.9.11
 
 Security fixes and a stricter check with the real CLIs:

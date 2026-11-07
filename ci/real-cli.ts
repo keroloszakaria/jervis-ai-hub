@@ -103,7 +103,9 @@ function cliError(out: string): string {
 
 /** One request as the hub sends it, run in `cwd`. */
 function ask(kind: Kind, path: string, cwd: string, prompt: string, mode: 'read' | 'write', model?: string): { out: string; run: Run } {
-  const inv = invocation(kind, path, prompt, mode, model)
+  // Codex runs under the hub's permission profile, as the hub sends it once its probe passed
+  const os = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'mac' : 'linux'
+  const inv = invocation(kind, path, prompt, mode, model, undefined, kind === 'codex' ? os : undefined)
   const started = Date.now()
   const r = spawnSync(inv.argv[0]!, inv.argv.slice(1), {
     cwd,

@@ -81,6 +81,8 @@ type World = {
   /** the working tree's changed files as git status reports them, path to [status, content]; the relay run switches to `workAfter` */
   work?: Record<string, [string, string]>
   workAfter?: Record<string, [string, string]>
+  /** what `codex sandbox` does with the hub's profiles: holds them (default), cannot run them (no MXC), or lets a read out */
+  codexSandbox?: 'ok' | 'no-mxc' | 'leaks'
   /** the relay's exit code (0 when absent) */
   relayCode?: number
   /** what the relay leaves: a result for this run (default), none, one for another brief, or an unknown schema */
@@ -241,6 +243,14 @@ function respond(w: World, run: Run) {
     const a = e.argv.join(' ')
     if ((e.argv[0] === 'where' || e.argv[0] === 'which') && w.paths?.[e.argv[1] ?? '']) return ok(`${w.paths[e.argv[1]!]}\n`)
     if ((e.argv[0] === 'where' || e.argv[0] === 'which') && w.shims?.[e.argv[1] ?? '']) return ok(`${w.shims[e.argv[1]!]}\n`)
+    // the hub's probe of Codex's sandbox: commands only, reading the files the probe wrote
+    if (e.argv.includes('sandbox') && e.argv.includes('--permission-profile')) {
+      const cmd = e.argv[e.argv.length - 1] ?? ''
+      const file = /'([^']+)'/.exec(cmd)?.[1] ?? cmd
+      if (w.codexSandbox === 'no-mxc') return ok('', 'windows sandbox failed: MXC is not available on this device\n', 1)
+      if (/[\\/]outside[\\/]/.test(file) && w.codexSandbox !== 'leaks') return ok('', 'Get-Content : Access is denied\n', 1)
+      return ok(w.written?.[winPath(file)] ?? '')
+    }
     if (e.argv[0] === 'git' && w.gitBroken) return ok('', "fatal: detected dubious ownership in repository at 'C:/proj'\n", 128)
     if (e.argv[0] === 'git' && !w.git) return ok('', 'fatal: not a git repository (or any of the parent directories): .git\n', 128)
     if (e.argv[0] === 'git' && w.git) {
@@ -407,7 +417,10 @@ test('read-only requests run in the sandbox; project access and writes ask first
   await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q1' } as never)
   const first = w.ran.filter(x => x.argv[1] === 'exec').pop()
   expect(first?.cwd).toBe('C:\\Temp\\jervis-ai-hub\\sandbox')
-  expect(first?.argv).toContain('read-only')
+  // Codex runs under the hub's read profile, in MXC, and not under the older --sandbox mode
+  expect(first?.argv).toContain('default_permissions="hubread"')
+  expect(first?.argv).toContain('windows.sandbox="mxc"')
+  expect(first?.argv).not.toContain('-s')
   expect(w.asked.length).toBe(0)
 
   const before = w.ran.filter(x => x.argv[1] === 'exec').length
@@ -422,8 +435,49 @@ test('read-only requests run in the sandbox; project access and writes ask first
   w.answer = 'Allow'
   await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q4', mode: 'write' } as never)
   const write = w.ran.filter(x => x.argv[1] === 'exec').pop()
-  expect(write?.argv).toContain('workspace-write')
+  expect(write?.argv).toContain('default_permissions="hubwrite"')
+  expect(write?.argv).not.toContain('-s')
   expect(write?.cwd).toBe('C:\\proj')
+})
+
+for (const mode of ['no-mxc', 'leaks'] as const) {
+  test(`Codex is refused when its sandbox cannot hold it to the folder (${mode}): nothing is sent`, async ($, on) => {
+    const w = world(LEGACY())
+    w.codexSandbox = mode
+    engine(on, w)
+    await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+    await settle()
+    const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q' } as never))
+    expect(r).toContain('so Codex would not be held to its folder')
+    expect(r).toContain('Allow Codex without read isolation')
+    expect(w.ran.some(x => x.argv[1] === 'exec')).toBe(false)
+  })
+}
+
+test('with Codex allowed without read isolation, it runs in its older sandbox and the answer says so', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, allowCodexUnisolated: true } })
+  w.codexSandbox = 'no-mxc'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q' } as never))
+  expect(r).toContain('Ran without read isolation')
+  const run = w.ran.filter(x => x.argv[1] === 'exec').pop()!
+  expect(run.argv).toContain('read-only')
+  expect(run.argv.some(a => a.startsWith('default_permissions'))).toBe(false)
+})
+
+test('the probe runs commands only, in a folder of its own: no model and no prompt', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q' } as never)
+  const probes = w.ran.filter(x => x.argv.includes('sandbox') && x.argv.includes('--permission-profile'))
+  // a read in and a read out, for each of the two profiles
+  expect(probes.length).toBe(4)
+  expect(probes.every(x => !x.argv.includes('exec') && x.stdin === undefined)).toBe(true)
+  expect(probes.every(x => /jervis-ai-hub[\\/]probe[\\/]work$/.test(winPath(x.cwd ?? '')))).toBe(true)
 })
 
 test('identical requests in flight run once; compare returns every provider', async ($, on) => {

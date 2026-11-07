@@ -135,6 +135,8 @@ export type Settings = {
   confirmProjectAccess: boolean
   /** writes on a CLI that is not held to the folder (Antigravity); off when absent */
   allowUnboundedWrites?: boolean
+  /** Codex runs when its sandbox cannot hold it to the folder (no MXC on Windows); off when absent */
+  allowCodexUnisolated?: boolean
   recordPreviews: boolean
   verifyOnConnect: boolean
   retentionCount: number

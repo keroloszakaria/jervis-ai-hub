@@ -3,6 +3,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Kind, Mode, Usage } from '../types'
 import { homeDir, joinPath, osName, tempDir } from './platform'
+import type { OsName } from './platform'
 
 /** Windows caps a command line near 32k characters (and other systems cap it too); agy takes its prompt as an argument. */
 export const MAX_ARG_PROMPT = 30_000
@@ -219,10 +220,14 @@ export function invocation(
   mode: Mode,
   model: string | undefined,
   effort?: string,
+  /** Codex: the hub's permission profile on this system, or its older sandbox mode when that is undefined */
+  codexOs?: OsName,
 ): Invocation {
   if (kind === 'codex') {
+    // the profile holds reads and writes to the folder; the older `-s` modes hold writes only
+    const sandbox = codexOs ? codexProfileArgs(codexOs, mode) : ['-s', mode === 'write' ? 'workspace-write' : 'read-only']
     return {
-      argv: [...argvOf(path), 'exec', '--json', '--skip-git-repo-check', '-s', mode === 'write' ? 'workspace-write' : 'read-only', ...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []), '-'],
+      argv: [...argvOf(path), 'exec', '--json', '--skip-git-repo-check', ...sandbox, ...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []), '-'],
       stdin: prompt,
     }
   }
@@ -402,4 +407,99 @@ export function versionNote(kind: Kind, versionText: string): string | undefined
   if (!v || !t.isOk(v)) return `refused: the hub's rules were checked on ${t.range} only`
   const seen = v.join('.')
   return seen === CHECKED[kind] ? 'checked' : `allowed, not checked itself (checked on ${CHECKED[kind]})`
+}
+
+/**
+ * Codex permission profiles (`-c`, for one run): every path denied, then the
+ * runtime's minimal paths readable, then the run's folder readable (read-only)
+ * or writable (write). Codex's OS sandbox enforces them: MXC on Windows,
+ * Seatbelt on macOS, bubblewrap on Linux. They must not be mixed with
+ * `--sandbox`, which would win over them.
+ */
+export const CODEX_PROFILES = {
+  read: { name: 'hubread', rules: '{":root"="deny",":minimal"="read",":workspace_roots"={"."="read"}}' },
+  write: { name: 'hubwrite', rules: '{":root"="deny",":minimal"="read",":workspace_roots"={"."="write"}}' },
+} as const
+
+/** The `-c` arguments that put one Codex run under the hub's profile for its mode. */
+export function codexProfileArgs(os: OsName, mode: Mode): string[] {
+  const p = CODEX_PROFILES[mode === 'write' ? 'write' : 'read']
+  return [
+    // on Windows only MXC can deny reads: the legacy elevated sandbox refuses these profiles
+    ...(os === 'windows' ? ['-c', 'windows.sandbox="mxc"'] : []),
+    '-c',
+    `permissions.${p.name}.filesystem=${p.rules}`,
+    '-c',
+    `default_permissions="${p.name}"`,
+  ]
+}
+
+export type CodexIsolation = { isOk: true } | { isOk: false; why: string }
+// one probe per Codex build: runs that start together share it, since each probe rewrites the same files
+const codexProbes = new Map<string, Promise<CodexIsolation>>()
+
+/**
+ * Whether Codex's sandbox holds a run to its folder on this machine: a probe
+ * through `codex sandbox` (commands only, no model, nothing sent) with each of
+ * the hub's profiles must read a file in its folder and must not read one the
+ * hub put outside it. Cached per Codex build; any failure is a refusal.
+ */
+export async function codexIsolation($: EngineInterface, path: string): Promise<CodexIsolation> {
+  let v = versions.get(path)
+  if (v === undefined) {
+    try {
+      const r = await $.process.run([...argvOf(path), '--version'], { timeoutMs: 20_000 })
+      v = clean(r.stdout || r.stderr).split('\n')[0] ?? ''
+    } catch {
+      v = ''
+    }
+    if (v) versions.set(path, v)
+  }
+  const key = `${path}|${v}`
+  const known = codexProbes.get(key)
+  if (known) return known
+  const probe = probeCodex($, path)
+  codexProbes.set(key, probe)
+  const result = await probe
+  // a probe that could not run at all is tried again next time; a held or a refused profile is kept
+  if (!result.isOk && result.why.startsWith("Codex's sandbox could not be checked")) codexProbes.delete(key)
+  return result
+}
+
+async function probeCodex($: EngineInterface, path: string): Promise<CodexIsolation> {
+  const os = await osName($)
+  const base = joinPath(os, await homeDir($), '.claude', 'jervis-ai-hub', 'probe')
+  const work = joinPath(os, base, 'work')
+  const inside = joinPath(os, work, 'inside.txt')
+  const outside = joinPath(os, base, 'outside', 'secret.txt')
+  const reader = (file: string): string[] =>
+    os === 'windows' ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', `Get-Content -LiteralPath '${file.replace(/'/g, "''")}'`] : ['cat', file]
+  let result: CodexIsolation = { isOk: true }
+  try {
+    for (const mode of ['read', 'write'] as const) {
+      const a = `in-${Math.random().toString(36).slice(2)}`
+      const b = `out-${Math.random().toString(36).slice(2)}`
+      await $.fs.write(inside, `${a}\n`)
+      await $.fs.write(outside, `${b}\n`)
+      const run = (file: string) =>
+        $.process.run([...argvOf(path), ...codexProfileArgs(os, mode), 'sandbox', '--permission-profile', CODEX_PROFILES[mode].name, '--', ...reader(file)], {
+          cwd: work,
+          timeoutMs: 60_000,
+        })
+      const r1 = await run(inside)
+      if (!r1.stdout.includes(a)) {
+        const why = clean(`${r1.stderr}\n${r1.stdout}`).trim().split('\n').pop() ?? ''
+        result = { isOk: false, why: `Codex's sandbox could not run the hub's ${mode} profile here${why ? ` (${why.slice(0, 200)})` : ''}` }
+        break
+      }
+      const r2 = await run(outside)
+      if (`${r2.stdout}${r2.stderr}`.includes(b)) {
+        result = { isOk: false, why: `Codex's sandbox let the hub's ${mode} profile read a file outside its folder` }
+        break
+      }
+    }
+  } catch (error) {
+    result = { isOk: false, why: `Codex's sandbox could not be checked (${errText(error)})` }
+  }
+  return result
 }
