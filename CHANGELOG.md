@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.11
+
+The pane in Arabic reads from the right:
+
+- **Right to left:** with the language set to Arabic, every row runs from the right (labels on the right, their controls on the left, the tabs in reading order), and a line of text or a button on its own sits at the right edge. Before, only the letters were ordered right to left; the layout stayed left to right.
+- **Mixed lines read correctly:** on the desktop, Arabic text is put in a right-to-left run, so a line that mixes in English words, model names or numbers reads from the right. The terminal orders the letters itself and is left as it was.
+- **More of the pane in Arabic:** the reason for each smart pick (“your chosen model, 52% of plan left”), the routing hint, the page name beside the title, statuses after their mark (“◐ Not tested”), the level descriptions, In use, Favorites, and the limit hints added in 0.10.10.
+- **A narrow pane kept hints in English:** a long hint was cut to fit before it was translated, so the cut English had no Arabic. It is now translated, then cut.
+- **Tests:** the Settings page in Arabic on the desktop and in the terminal, and in English, which keeps its rows as written.
+
 ## 0.10.10
 
 Old limit readings stop steering the router:

@@ -6,6 +6,7 @@ import type { EngineInterface, Elements } from 'claude-code'
 
 import type { Review } from '../types'
 import { hasArabic, tr } from './i18n'
+import { isolate, mirroredBox } from './rtl'
 import { DEFAULT_SETTINGS } from './state'
 import type { Compared, WorkRun } from './workspace'
 
@@ -63,17 +64,21 @@ export function diffExcerpt(c: Compared, maxFiles = 3, maxLines = 30): string {
 
 type Els = Elements[keyof Elements]
 
-export async function renderReview($: EngineInterface, els: Els) {
-  const { Box, Text: BaseText, Button: BaseButton } = els
+export async function renderReview($: EngineInterface, els: Els, surface?: string) {
+  const { Box: BaseBox, Text: BaseText, Button: BaseButton } = els
   const isAr = (await read($, settings)).language === 'ar'
+  // in Arabic the pane is laid out from the right; the terminal orders the letters itself
+  const Box = isAr ? mirroredBox(BaseBox) : BaseBox
+  const bidi = isAr && surface !== 'terminal'
   const T = (s: string): string => (isAr ? tr(s) : s)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const Text = ((props: any) => {
     const { children, ...rest } = props ?? {}
     const kids = (Array.isArray(children) ? children : children === undefined ? [] : [children]).map((k: unknown) => (typeof k === 'string' && !rest.mono ? T(k) : k))
     const rtl = isAr && kids.some((k: unknown) => typeof k === 'string' && hasArabic(k))
+    const shown = rtl && bidi ? kids.map((k: unknown) => (typeof k === 'string' && hasArabic(k) ? isolate(k) : k)) : kids
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return h(BaseText as any, { ...rest, ...(rtl ? { dir: 'rtl' } : {}) }, ...kids)
+    return h(BaseText as any, { ...rest, ...(rtl ? { dir: 'rtl' } : {}) }, ...shown)
   }) as typeof BaseText
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const Button = ((props: any) => h(BaseButton as any, { ...props, label: T(props.label) })) as typeof BaseButton

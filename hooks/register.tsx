@@ -412,8 +412,8 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
-    return renderPane($, els, e.props.bodyColumns ?? 40)
+    return renderPane($, els, e.props.bodyColumns ?? 40, e.surface)
   })
 
-  on('ui.render', { component: 'Pane', requestId: REVIEW_PANE }, async ($, e) => renderReview($, $.ui.resolve(e)))
+  on('ui.render', { component: 'Pane', requestId: REVIEW_PANE }, async ($, e) => renderReview($, $.ui.resolve(e), e.surface))
 }

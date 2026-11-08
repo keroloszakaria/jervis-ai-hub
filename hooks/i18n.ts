@@ -200,7 +200,8 @@ const AR: Record<string, string> = {
   automatic: 'تلقائي',
   otherwise: 'غير كده',
   'first verified': 'أول واحد متأكد منه',
-  'fix a task to one provider or model; left on smart pick, the hub chooses.': 'ثبّت مهمة على provider أو موديل؛ ولو سبتها على الاختيار الذكي، الهب هو اللي يختار.',
+  'fix a task to one provider or model. otherwise, a default provider answers; with none, the hub chooses.':
+    'ثبّت مهمة على provider أو موديل. غير كده بيرد الـ provider الافتراضي، ولو مفيش، الهب هو اللي يختار.',
   'who answers each kind of request when no provider is named.': 'مين يرد على كل نوع طلب لما ما تحددش provider.',
   'separate rules for this project': 'قواعد منفصلة للمشروع ده',
   'no project folder in this session.': 'مفيش فولدر مشروع في الجلسة دي.',
@@ -244,6 +245,9 @@ const AR: Record<string, string> = {
   'light only': 'خفيف بس',
   'standard only': 'متوسط بس',
   'heavy only': 'تقيل بس',
+  'search, lookups, summaries, renames, boilerplate': 'بحث، استعلامات، ملخصات، إعادة تسمية، كود متكرر',
+  'everyday code changes and explanations': 'تعديلات الكود اليومية والشرح',
+  'hard bugs, architecture, security and careful reviews': 'bugs صعبة، معمارية، أمان، ومراجعات دقيقة',
   unrated: 'من غير مستوى',
   'the session’s model': 'موديل الـ session',
   'set these in settings → claude subagents.': 'غيّرها من Settings ← Claude subagents.',
@@ -259,6 +263,13 @@ const AR: Record<string, string> = {
   '🔒 keys are typed into a masked system dialog and kept in your system’s secure storage (windows dpapi, macos keychain or the linux keyring), never shown here.':
     '🔒 المفاتيح بتتكتب في نافذة نظام مخفية، وبتتحفظ في التخزين الآمن بتاع نظامك (Windows DPAPI أو macOS Keychain أو keyring في Linux)، ومش بتظهر هنا أبداً.',
   keep: 'احتفظ بـ',
+  '🔒 prompts and answers stay private: only sizes and outcomes are kept.': '🔒 الطلبات والردود بتفضل خاصة: بيتحفظ الحجم والنتيجة بس.',
+  'run by the hub, under its write profile': 'الهب بيشغّله، تحت الـ write profile بتاعه',
+  'claude chose': 'Claude اختاره',
+  'your session': 'الـ session بتاعتك',
+  'reset since this reading': 'اتجدد بعد القراية دي',
+  'in use': 'مستخدم',
+  favorites: 'المفضّلة',
   for: 'لمدة',
   'checks the clis, secure storage, jervis relay and models.dev.': 'بيفحص الـ CLIs والتخزين الآمن و Jervis Relay و models.dev.',
 }
@@ -266,7 +277,49 @@ const AR: Record<string, string> = {
 const UNIT: Record<string, string> = { s: 'ثانية', m: 'دقيقة', h: 'ساعة', d: 'يوم' }
 const WINDOW: Record<string, string> = { weekly: 'الأسبوعي', daily: 'اليومي', '5-hour': 'الـ 5 ساعات', spend: 'الصرف' }
 
+// the parts of a smart pick's reason, joined by commas
+const WHY: Record<string, string> = {
+  'your chosen model': 'الموديل اللي اخترته',
+  free: 'مجاني',
+  'your plan': 'ضمن اشتراكك',
+  reasoning: 'بيفكّر',
+  'no reasoning': 'من غير تفكير',
+  'tool calls': 'بيستخدم أدوات',
+  'image input': 'بيقرا صور',
+  'low effort': 'effort قليل',
+  'limits not read recently': 'الحدود ما اتقرتش من فترة، فمش معروفة',
+}
+
+function why(s: string): string {
+  const head = s.match(/^default provider: (.+)$/)
+  if (head) return `الـ provider الافتراضي: ${why(head[1]!)}`
+  return s
+    .replace('limits not read recently, so unknown', 'limits not read recently')
+    .split(', ')
+    .map(part => {
+      const p = part.trim()
+      const hit = WHY[p.toLowerCase()]
+      if (hit) return hit
+      let m = p.match(/^(\d+)% of plan left$/)
+      if (m) return `باقي ${m[1]}% من الاشتراك`
+      m = p.match(/^(\d+)k context$/)
+      if (m) return `context ${m[1]}k`
+      m = p.match(/^you set it (\w+)$/)
+      if (m) return `إنت حددته ${tr(m[1]!)}`
+      m = p.match(/^\$([\d.]+)\/1M list price$/)
+      if (m) return `$${m[1]} لكل مليون token`
+      return p
+    })
+    .join('، ')
+}
+
 const PATTERNS: [RegExp, (m: RegExpMatchArray) => string][] = [
+  [/^Read (\d+) min ago, so it may be out of date and does not steer routing\. Refresh to read it again\.$/, m => `اتقرت من ${m[1]} دقيقة، فممكن تكون قديمة ومش بتأثر على التوجيه. دوس تحديث علشان تتقري تاني.`],
+  [/^(Light|Standard|Heavy): (.+) · (Light|Standard|Heavy): (.+) · (Light|Standard|Heavy): (.+)$/, m => `${tr(m[1]!)}: ${tr(m[2]!)} · ${tr(m[3]!)}: ${tr(m[4]!)} · ${tr(m[5]!)}: ${tr(m[6]!)}`],
+  [/^\/ (.+)$/, m => `/ ${tr(m[1]!)}`],
+  // a status after its mark: "◐ Not tested"
+  [/^([^\p{L}\p{N}\s]{1,2}) ([A-Z][a-z].*)$/u, m => (tr(m[2]!) === m[2] ? m[0]! : `${m[1]} ${tr(m[2]!)}`)],
+  [/^default provider: (.+)$/i, m => `الـ provider الافتراضي: ${why(m[1]!)}`],
   [/^(\d+) connected$/i, m => `${m[1]} متوصل`],
   [/^● (\d+)\/(\d+) ready$/i, m => `● ${m[1]}/${m[2]} جاهز`],
   [/^(\d+(?:\.\d+)?)% used(?: · resets in (.+))?$/i, m => `مستخدم ${m[1]}%${m[2] ? ` · يتجدد بعد ${m[2]}` : ''}`],
@@ -283,7 +336,7 @@ const PATTERNS: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^From (.+) · checked (.+)$/i, m => `من ${m[1]} · اتفحص ${tr(m[2]!)}`],
   [/^Model list updated (.+?)( · out of date)?$/, m => `قايمة الموديلات اتحدثت ${tr(m[1]!)}${m[2] ? ' · قديمة' : ''}`],
   [/^(.+) \(your rule\)$/i, m => `${m[1]} (قاعدتك)`],
-  [/^Why: (.+)$/i, m => `السبب: ${m[1]}`],
+  [/^Why: (.+)$/i, m => `السبب: ${why(m[1]!)}`],
   [/^ \/ (.+)$/, m => ` / ${tr(m[1]!)}`],
   [/^✓ In use · set its effort on the (.+) page$/i, m => `✓ مستخدم · اختار الـ effort من صفحة ${m[1]}`],
   [/^(.+) is the CLI’s default\.$/i, m => `${tr(m[1]!)} هو الافتراضي في الـ CLI.`],

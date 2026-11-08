@@ -3,6 +3,7 @@
 // it says.
 import { LOGOS } from './logos'
 import { hasArabic, tr } from './i18n'
+import { isolate, mirroredBox } from './rtl'
 import { atom, read } from 'claude-code'
 import type { EngineInterface, Elements } from 'claude-code'
 
@@ -219,9 +220,12 @@ const decodeRoute = (v: string): Route | undefined => {
   return { provider: p, model: m || undefined }
 }
 
-export async function renderPane($: EngineInterface, els: Els, cols: number) {
-  const { Box, Text: BaseText, Button: BaseButton, Link } = els
+export async function renderPane($: EngineInterface, els: Els, cols: number, surface?: string) {
+  const { Box: BaseBox, Text: BaseText, Button: BaseButton, Link } = els
   const isAr = (await read($, settings)).language === 'ar'
+  // in Arabic the pane is laid out from the right; the terminal orders the letters itself
+  const Box = isAr ? mirroredBox(BaseBox) : BaseBox
+  const bidi = isAr && surface !== 'terminal'
   /** a label in the pane's language, keeping the spaces around it */
   const T = (s: string): string => {
     if (!isAr || !s.trim()) return s
@@ -237,8 +241,9 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
     const raw = children === undefined ? [] : Array.isArray(children) ? children : [children]
     const kids = raw.map((c: unknown) => (typeof c === 'string' ? T(c) : c))
     const rtl = isAr && kids.some((c: unknown) => typeof c === 'string' && hasArabic(c))
+    const shown = rtl && bidi ? kids.map((c: unknown) => (typeof c === 'string' && hasArabic(c) ? isolate(c) : c)) : kids
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return h(BaseText as any, { ...rest, ...(rtl ? { dir: 'rtl' } : {}), color: tone(color, dimColor) }, ...kids)
+    return h(BaseText as any, { ...rest, ...(rtl ? { dir: 'rtl' } : {}), color: tone(color, dimColor) }, ...shown)
   }) as typeof BaseText
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const Button = ((props: any) => h(BaseButton as any, { ...props, label: typeof props?.label === 'string' ? T(props.label) : props?.label })) as typeof BaseButton
@@ -292,9 +297,10 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
       ) : null)}
     </Box>
   )
-  const Hint = ({ text }: { text: string }) => (
+  // a hint cut to max characters after it is put in the pane's language, so a cut never keeps it in English
+  const Hint = ({ text, max }: { text: string; max?: number }) => (
     <Text size="footnote" dimColor>
-      {text}
+      {max ? snip(T(text), max) : text}
     </Text>
   )
   const Avatar = ({ id, label, color, size = 28 }: { id: string; label: string; color?: string; size?: number }) =>
@@ -510,10 +516,14 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
     <Box flexDirection="column">
       <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
         <Box flexDirection="column" flexShrink={1}>
-          <Text size="heading" weight="bold">
-            Jervis AI Hub
-            <Text weight="regular" dimColor>{` / ${u.view ? '' : cap(u.tab)}`.replace(/ \/ $/, '')}</Text>
-          </Text>
+          <Box flexDirection="row">
+            <Text size="heading" weight="bold">
+              Jervis AI Hub
+            </Text>
+            <Text size="heading" weight="regular" dimColor>
+              {` / ${u.view ? '' : cap(u.tab)}`.replace(/ \/ $/, '')}
+            </Text>
+          </Box>
           <Text size="caption" mono color={connected.length && ready === connected.length ? 'success' : connected.length ? 'warning' : undefined} dimColor={!connected.length}>
             {connected.length === 0 ? 'no providers yet' : `● ${ready}/${connected.length} ready`}
           </Text>
@@ -1339,7 +1349,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
                       {snip(text, Math.max(10, IN - 16))}
                     </Text>
                   </Box>
-                  {!rule && pk && 'route' in pk ? <Hint text={snip(pk.reason.replace(/^smart pick for \w+: ?/, 'Why: '), IN * 2)} /> : null}
+                  {!rule && pk && 'route' in pk ? <Hint text={`Why: ${pk.reason.replace(/^(default provider: )?smart pick for \w+(?: work)?: ?/, '$1')}`} max={IN * 2} /> : null}
                 </Box>
               )
             })}
@@ -1349,7 +1359,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
 
       <Heading title="Routing rules" />
       <Box key="routing-card" {...CARD}>
-        <Hint text={snip(profile === 'global' ? (isSmart ? 'Fix a task to one provider or model. Otherwise, a default provider answers; with none, the hub chooses.' : 'Who answers each kind of request when no provider is named.') : `Rules for this project: ${profile}`, IN * 2)} />
+        <Hint text={profile === 'global' ? (isSmart ? 'Fix a task to one provider or model. Otherwise, a default provider answers; with none, the hub chooses.' : 'Who answers each kind of request when no provider is named.') : `Rules for this project: ${profile}`} max={IN * 2} />
         {TASKS.map(t => (
           <Pick id={`route-${t.id}`} label={t.label} value={encodeRoute(routes[t.id])} options={routeOptions} onSelect={v => setRoute(t.id, v)} />
         ))}

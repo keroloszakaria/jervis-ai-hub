@@ -2562,3 +2562,51 @@ test('a whole result is read only by the session whose job it was', async ($, on
   const other = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status', id } as never))
   expect(other).not.toContain('B'.repeat(300))
 })
+
+// every Box in a drawn tree, outermost first
+const boxes = (n: unknown, out: { props: Record<string, unknown>; children: unknown[] }[] = []) => {
+  if (n && typeof n === 'object' && !Array.isArray(n)) {
+    const e = n as { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+    if (e.type === 'Box') out.push({ props: e.props ?? {}, children: e.children ?? [] })
+    for (const c of e.children ?? []) boxes(c, out)
+  }
+  return out
+}
+
+for (const surface of ['desktop', 'terminal'] as const) {
+  test(`in Arabic the pane is laid out from the right (${surface})`, async ($, on) => {
+    const w = world({ ...LEGACY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, language: 'ar' } })
+    engine(on, w)
+    await $.session.start({ cwd: 'C:\proj', surface, isInteractive: true })
+    await settle(60)
+    const ui = await $.ui.mount({ ...PANE(), surface })
+    await ui.press({ key: 'tab-settings' })
+    const all = boxes(await ui.drawn())
+    // rows run from the right: no Box is a plain row any more
+    expect(all.some(b => b.props.flexDirection === 'row-reverse')).toBe(true)
+    expect(all.some(b => b.props.flexDirection === 'row' || b.props.flexDirection === undefined)).toBe(false)
+    // a line standing alone in a column sits in a row that starts at the right
+    const hint = await ui.find({ type: 'Text', text: /ثبّت مهمة على provider/ })
+    expect(hint).toBeDefined()
+    // the reason for a pick reads in Arabic, parts and all
+    expect(await ui.find({ type: 'Text', text: /السبب: الموديل اللي اخترته/ })).toBeDefined()
+    // the desktop gets right-to-left isolates; the terminal orders the letters itself
+    const json = JSON.stringify(await ui.drawn())
+    expect(json.includes('\u2067')).toBe(surface !== 'terminal')
+    await ui.unmount()
+  })
+}
+
+test('in English the pane keeps its rows as written', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle(60)
+  const ui = await $.ui.mount({ ...PANE(), surface: 'desktop' })
+  await ui.press({ key: 'tab-settings' })
+  const json = JSON.stringify(await ui.drawn())
+  expect(json).toContain('"flexDirection":"row"')
+  expect(json).not.toContain('row-reverse')
+  expect(json.includes('\u2067')).toBe(false)
+  await ui.unmount()
+})
