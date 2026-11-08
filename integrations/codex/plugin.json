@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "jervis-ai-hub",
+  "version": "0.11.0",
+  "description": "Ask and compare the other AIs you connected (your own subscriptions and keys), run background jobs on them, and read their models and limits.",
+  "author": { "name": "Jervis Tech" },
+  "repository": "https://github.com/keroloszakaria/jervis-ai-hub",
+  "license": "MIT",
+  "extensions": {
+    "com.openai": {
+      "interface": { "displayName": "Jervis AI Hub" }
+    }
+  }
+}

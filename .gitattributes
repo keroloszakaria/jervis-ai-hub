@@ -1,1 +1,2 @@
 dist/*.mjs -text
+integrations/*/dist/*.mjs -text
