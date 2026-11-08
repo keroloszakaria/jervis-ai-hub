@@ -80,7 +80,7 @@ The pane opens by itself when a session starts. To open it again, type:
 
 At the top you see the title, how many providers are ready (for example `● 2/3 ready`), the **+ Add** button and four tabs: **Overview**, **Models**, **Activity** and **Settings**.
 
-On the first start the hub checks the ChatGPT, Antigravity and OpenCode sign-ins you already have and links the ones that work. That check sends no prompt.
+On the first start the hub tries to connect ChatGPT, Antigravity and OpenCode, and links the ones you are already signed in to. No prompt is sent. If Codex is installed but you are signed out of it, this can open the ChatGPT sign-in link.
 
 ## Connect a provider
 
@@ -121,7 +121,7 @@ Being signed in does not prove a request works. Open the provider and click **Te
 
 ### A provider's page
 
-- **Requests**, **Avg latency** and **Tokens** (in / out, or "not reported" when the CLI gives none).
+- **Requests**, **Avg latency** and **Tokens** (in / out; OpenCode providers, whose CLI reports no usage, show "not reported").
 - **Limits** card: the plan, a meter per window ("N% used · resets in …"), and where the reading came from.
 - **Model**: pick the model, then its **Effort** (only the efforts that model lists). With no effort picked, the CLI's default is used.
 - **Connection**: the sign-in, the last test, whether delegation is available, and how it is billed.
@@ -184,7 +184,7 @@ Each request can carry a level, so simple work does not spend a strong model:
 - **Standard:** everyday code changes and explanations.
 - **Heavy:** hard bugs, architecture, security and careful reviews.
 
-The hub picks a model and effort that serve the level. Heavy work is never stepped down to a weaker model: if no model serves it, the request is refused.
+The hub picks a model and effort that serve the level. With "Pick the best model for each task" on (the default), heavy work is never stepped down to a weaker model: if no model serves it, the request is refused. With it off, the level does not choose the model.
 
 ## Ask directly: /ask-ai
 
@@ -229,7 +229,7 @@ A provider whose reading says its limit is reached is skipped. So is a rule whos
 
 A write (`ask_ai` in write mode) or a delegation (`delegate_ai`) can change files. This is how it goes:
 
-1. **You are asked first.** "Let &lt;provider&gt; change files in &lt;folder&gt;?" with **Allow** or **Deny**.
+1. **You are asked first.** "Let &lt;provider&gt; change files in a copy of &lt;folder&gt;? You see the changes before any reach the folder. Nothing is committed." with **Allow** or **Deny**.
 2. **It works in a copy.** The hub copies your folder to `~/.claude/jervis-ai-hub/work/<run>/`, leaving out:
    - the `.git` folder and files your `.gitignore` ignores;
    - links and submodules;
@@ -237,6 +237,8 @@ A write (`ask_ai` in write mode) or a delegation (`delegate_ai`) can change file
    - files with something that looks like a key inside them;
    - anything you list in a `.jervisignore` in the folder's root, in `.gitignore` syntax;
    - folders that lead outside the project.
+
+   A folder of more than 20,000 files or 300 MB is not copied, and nothing is sent.
 3. **You review it.** The **Review changes** pane shows each file's diff, and you answer in the question:
    - **Apply** writes the changes into your folder. Nothing is staged or committed.
    - **Keep for later** keeps them for 7 days. Ask Claude to apply run `run-…` later, and it uses `apply_changes`.
@@ -254,14 +256,14 @@ Apply touches only files that have not changed in your folder since the copy was
 
 Antigravity is off for writes by default because its writes are not held to the folder: they can change any file you can.
 
-**Deadlines:** a test stops after 2 minutes, a read after 5, a write after 10 and a delegation after 30. A request the hub could not confirm has ended is reported as possibly still running.
+**Deadlines:** a test stops after 2 minutes, a read after 5, a write or a Codex delegation after 10, and an Antigravity delegation through Jervis Relay after 30. A request the hub could not confirm has ended is reported as possibly still running.
 
 ## Background jobs
 
 For a large task, Claude can split it into pieces and start each with `start_job` at its level. A piece runs on another AI (read-only) or on a Claude subagent.
 
 - At most 4 jobs run at once.
-- A band above the prompt shows each job: ◐ running, ✓ done, ✕ failed or ■ stopped. It shows the job's level, where it runs, and for how long.
+- A band above the prompt shows the last 5 jobs: ◐ running, ✓ done, ✕ failed or ■ stopped. It shows the job's level, where it runs, and for how long.
 - **Stop** ends a running job on another AI. A subagent job cannot be stopped from the hub.
 - **Clear ended** hides finished jobs. Their results can still be read.
 - When a job ends you get a toast. Its result (up to 4,000 characters) is added to the conversation unless you turned that off, and `job_status` reads the whole result.
@@ -290,7 +292,7 @@ The hub never estimates or invents a number:
 | --- | --- | --- |
 | Pick the best model for each task | On | The smart pick. It lists today's pick per task and why. |
 | Routing rules (General, Coding, Code review, Hard reasoning, Fast answers, Images) | Smart pick | A fixed provider or favourite model per task. Your rule wins. |
-| Otherwise | First verified | The default provider when no rule applies. |
+| Otherwise | First verified | A default provider for tasks with no rule. Left on First verified, the smart pick decides (or, with it off, the first verified provider). |
 | Separate rules for this project | Off | Rules that apply only in this project's folder. |
 | Fall back when a read-only request fails | Off | Try up to 1–3 other providers, asking you first. |
 
@@ -318,7 +320,7 @@ The hub never estimates or invents a number:
 
 **History:** keep the last 25, 100 or 500 requests (default 100), for 1, 7, 30 or 90 days (default 30).
 
-**Diagnostics:** **Run checks** checks each CLI and its version, Codex read isolation, secure key storage, Node.js for Jervis Relay, delegation per provider, and the models.dev metadata.
+**Diagnostics:** **Run checks** checks each CLI and its version, Codex read isolation, secure key storage, Node.js for Jervis Relay, delegation for ChatGPT, Antigravity and OpenCode Zen, and the models.dev metadata.
 
 ## Privacy and security
 
@@ -349,7 +351,7 @@ Install and details: [docs/integrations/CODEX.md](integrations/CODEX.md) and [do
 | You see | What to do |
 | --- | --- |
 | `<provider>: its CLI is not installed.` / ○ CLI missing | Install the CLI from [What you need](#what-you-need), then click **Connect**. |
-| `agy is not signed in: run agy once in a terminal and sign in.` | Do that, then click **Connect** again. |
+| ``agy is not signed in: run `agy` once in a terminal and sign in.`` | Do that, then click **Connect** again. |
 | ○ Signed out after a request | The key or sign-in was refused. Sign in again or save a new key, then connect again. |
 | `<CLI> <version> is not a version whose … limits the hub has checked` | Install a version from the table in [What you need](#what-you-need). |
 | `Project access was not allowed (declined, or nobody could be asked): nothing was sent.` | You chose **Deny**, or nobody could answer (for example a headless run). Ask again and allow it. |
