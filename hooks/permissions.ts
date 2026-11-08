@@ -90,6 +90,26 @@ export async function allowProjectRead($: EngineInterface, providerId: string, d
 }
 
 /**
+ * Whether a prompt may go on to another provider after the first failed. The
+ * person chose the first provider, not this one, so it is asked about on its
+ * own; "Allow this session" covers that provider for the rest of the session.
+ */
+export async function allowFallback($: EngineInterface, from: string, to: string, why?: string): Promise<boolean> {
+  const session = await sessionKey($)
+  const grant = `${session}|fallback|${to}`
+  if (session && readGrants.has(grant)) return true
+  const a = provider(from)?.label ?? from
+  const b = provider(to)?.label ?? to
+  const answer = await confirm($, `${a} could not answer${why ? ` (${why})` : ''}. Send the prompt to ${b} instead? It goes to that provider.`, [
+    'Allow once',
+    'Allow this session',
+    'Deny',
+  ])
+  if (answer === 'Allow this session' && session) readGrants.add(grant)
+  return answer === 'Allow once' || answer === 'Allow this session'
+}
+
+/**
  * Whether a provider's writes are held to the folder: Codex by its own
  * `workspace-write` sandbox, OpenCode by the hub's rules (file tools only,
  * inside the folder). Antigravity's accept-edits mode and its relay are not.

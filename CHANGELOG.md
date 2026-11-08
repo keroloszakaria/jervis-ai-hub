@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.9
+
+Consent before a prompt moves to another provider:
+
+- **A fallback asks first, even with no folder:** when the provider you chose fails and fallback is on, the hub asks before the prompt goes to the next provider: "Send the prompt to … instead?", with Allow once, Allow this session and Deny. Before, the hub asked only when a project folder was involved.
+- **A no stops the fallback:** Deny, or a question closed without an answer, sends nothing to that provider or any after it. The answer says so.
+- **Allow this session** covers that provider for the rest of the session only. Another session asks again.
+- **Activity shows a declined fallback:** a refused row names the provider and the one it would have fallen back from. This holds with a folder too.
+- **Tests:** Deny and a closed question with three providers connected, and a session grant that does not carry over to another session.
+
 ## 0.10.8
 
 A routing order you can see:

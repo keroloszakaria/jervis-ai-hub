@@ -77,7 +77,7 @@ export async function askTool(
     return { isOk: false, text: 'The person declined project access: nothing was sent.' }
   }
   const r = await askWithFallback($, { provider: providerId, model, effort }, a.prompt, a.task, f?.real, a.level)
-  const via = `${why ? `\n(${why})` : ''}${r.tried.length > 1 ? `\n(fell back after: ${r.tried.slice(0, -1).join(', ')})` : ''}${r.declined ? `\n(the person declined to let ${provider(r.declined)?.label ?? r.declined} read the project, so nothing was sent to it)` : ''}${r.stopped ? `\n(no other provider was tried after this failure (${ERROR_LABEL[r.stopped]}): only a limit, a network problem or an unavailable provider falls back)` : ''}`
+  const via = `${why ? `\n(${why})` : ''}${r.tried.length > 1 ? `\n(fell back after: ${r.tried.slice(0, -1).join(', ')})` : ''}${r.declined ? `\n(the person declined to let ${provider(r.declined)?.label ?? r.declined} ${f ? 'read the project' : 'take the prompt'}, so nothing was sent to it)` : ''}${r.stopped ? `\n(no other provider was tried after this failure (${ERROR_LABEL[r.stopped]}): only a limit, a network problem or an unavailable provider falls back)` : ''}`
   return {
     isOk: r.isOk,
     text: `${header(r)}\n${r.text}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}${via}`,

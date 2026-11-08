@@ -1071,6 +1071,7 @@ test('a provider at its limit is fallen back from, and the answer names it', asy
   const w = world(FALLBACK())
   w.execOk = false
   w.execOut = AT_LIMIT
+  w.answer = 'Allow once'
   engine(on, w)
   await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
   await settle()
@@ -1173,6 +1174,53 @@ for (const c of ORDER) {
     expect(r).toContain(`(${why})`)
   })
 }
+
+for (const answer of ['Deny', 'closed without an answer']) {
+  test(`with no folder, a fallback is asked about first; "${answer}" sends nothing to it or any after it`, async ($, on) => {
+    // three providers: the one asked about and the one after it both get nothing
+    const base = LEGACY()
+    const w = world({ ...base, 'config-v2': { ...base['config-v2'], 'opencode-free': { isConnected: true, isEnabled: true } }, 'hub-settings-v1': { ...DEFAULT_SETTINGS, fallback: true, maxFallbacks: 3 } })
+    w.execOk = false
+    w.execOut = AT_LIMIT
+    w.answer = answer
+    engine(on, w)
+    await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+    await settle()
+    const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'private words' } as never))
+    expect(w.asked.length).toBe(1)
+    expect(w.asked[0]).toMatch(/^ChatGPT \(Codex\) could not answer \(limit reached\)\. Send the prompt to (DeepSeek|OpenCode.*) instead\?/)
+    expect(w.ran.some(x => x.argv.includes('run'))).toBe(false)
+    expect(r).toContain('take the prompt, so nothing was sent to it')
+    const log = w.store['hub-activity-v1'] as { provider: string; state: string; error?: string; fallbackFrom?: string }[]
+    const row = log[log.length - 1]!
+    expect(row.provider).not.toBe('chatgpt')
+    expect([row.state, row.fallbackFrom]).toEqual(['error', 'chatgpt'])
+    expect(log.filter(x => x.provider !== 'chatgpt').length).toBe(1)
+    expect(row.error).toContain('refused: the person did not allow the fallback')
+  })
+}
+
+test('"Allow this session" covers that provider for the session only; another session is asked again', async ($, on) => {
+  const w = world(FALLBACK())
+  w.execOk = false
+  w.execOut = AT_LIMIT
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answer = 'Allow this session'
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'a' } as never)
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'b' } as never)
+  expect(w.asked.length).toBe(1)
+  expect(w.ran.filter(x => x.argv.includes('run')).length).toBe(2)
+
+  w.session = 's2'
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answer = 'Deny'
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'c' } as never)
+  expect(w.asked.length).toBe(2)
+  expect(w.ran.filter(x => x.argv.includes('run')).length).toBe(2)
+})
 
 test('a CLI installed by npm is run through the script its shim names, never through a shell', async ($, on) => {
   const w = world(LEGACY())

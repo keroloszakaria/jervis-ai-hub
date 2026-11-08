@@ -6,8 +6,9 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Capability, Level, Route, Routes, Task } from '../types'
 import { hasCapability } from './models'
-import { type ErrorKind, mayFallBack } from './cli'
-import { allowProjectRead } from './permissions'
+import { ERROR_LABEL, type ErrorKind, mayFallBack } from './cli'
+import { allowFallback, allowProjectRead } from './permissions'
+import { begin, finish } from './activity'
 import { PROVIDERS, provider } from './registry'
 import { type RequestResult, readiness, runRequest } from './requests'
 import { type SmartPick, smartPick } from './smart'
@@ -146,7 +147,14 @@ export async function askWithFallback(
     const best = pick ? (pick as SmartPick).route : undefined
     const model = best?.model
     const effort = best?.effort
-    if (projectDir && !(await allowProjectRead($, id, projectDir))) return { ...r, tried, declined: id }
+    // the person chose the first provider, not this one: with a folder its files, without one the prompt, are asked about first
+    const from = tried[tried.length - 1]!
+    const allowed = projectDir ? await allowProjectRead($, id, projectDir) : await allowFallback($, from, id, r.errorKind ? ERROR_LABEL[r.errorKind] : undefined)
+    if (!allowed) {
+      const row = await begin($, { type: 'ask', provider: id, mode: 'read', task, prompt, fallbackFrom: from })
+      await finish($, row, { state: 'error', ms: 0, error: `refused: the person did not allow the fallback from ${from}; nothing was sent` })
+      return { ...r, tried, declined: id }
+    }
     r = await runRequest($, { providerId: id, model, effort, prompt, mode: 'read', cwd: projectDir, type: 'ask', task, fallbackFrom: tried[tried.length - 1] })
     tried.push(id)
     if (r.isOk || !mayFallBack(r.errorKind)) break
