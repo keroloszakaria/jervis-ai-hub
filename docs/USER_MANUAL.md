@@ -152,7 +152,7 @@ The hub shows only what each source reports. Nothing is guessed.
 - **Export** writes the list as `.json` and `.md` to `<temp folder>/jervis-ai-hub/exports/`. It holds metadata only: no prompts, answers or error text.
 - **Clear** empties the list.
 
-### Settings
+### The Settings tab
 
 Every setting is explained in [Settings](#settings) below.
 
