@@ -1,0 +1,12 @@
+{
+  "name": "jervis-ai-hub",
+  "interface": { "displayName": "Jervis AI Hub" },
+  "plugins": [
+    {
+      "name": "jervis-ai-hub",
+      "source": { "source": "local", "path": "./integrations/codex" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

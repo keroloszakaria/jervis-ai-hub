@@ -71,3 +71,6 @@ jobs:
       - name: The Antigravity plugin ships the same bundle
         if: matrix.os == 'ubuntu-latest'
         run: cmp dist/jervis-mcp.mjs integrations/antigravity/dist/jervis-mcp.mjs
+      - name: The Codex plugin ships the same bundle
+        if: matrix.os == 'ubuntu-latest'
+        run: cmp dist/jervis-mcp.mjs integrations/codex/dist/jervis-mcp.mjs
