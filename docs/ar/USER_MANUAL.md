@@ -6,7 +6,7 @@
 
 Jervis AI Hub هو mod لـ Claude Code. بيوصّل اشتراكات الذكاء الاصطناعي ومفاتيح الـ API اللي عندك أصلًا، ويخلي Claude يسألهم، ويقارن إجاباتهم، ويشغّل عليهم شغل في الخلفية، أو يسلّمهم مهمة برمجة. والقرار في إيدك: مفيش حاجة بتقرا مشروعك أو بتغيّر ملف من غير ما توافق.
 
-الدليل ده لإصدار 0.11.0.
+الدليل ده لإصدار `0.11.0`.
 
 ## المحتويات
 
@@ -35,8 +35,8 @@ Jervis AI Hub هو mod لـ Claude Code. بيوصّل اشتراكات الذك�
 | عشان توصّل | ثبّت | الإصدار |
 | --- | --- | --- |
 | ChatGPT (اشتراكك في ChatGPT، عن طريق Codex) | Codex CLI (`codex`) | أي إصدار |
-| Antigravity | Antigravity CLI (`agy`) | 1.5 أو أي 1.x أحدث |
-| OpenCode Zen (المجاني) وكل providers مفاتيح الـ API | OpenCode (`opencode`) | 2.x |
+| Antigravity | Antigravity CLI (`agy`) | `1.5` أو أي `1.x` أحدث |
+| OpenCode Zen (المجاني) وكل providers مفاتيح الـ API | OpenCode (`opencode`) | `2.x` |
 
 - Node.js، بس لو هتعمل delegation لـ Antigravity عن طريق Jervis Relay.
 
