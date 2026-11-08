@@ -37,6 +37,8 @@ This repository is private: installing needs read access to it on GitHub and a g
 
 Open the pane with `/ai-providers`.
 
+How to use every part of it: the [user manual](docs/USER_MANUAL.md) ([Arabic](docs/ar/USER_MANUAL.md)).
+
 ## Developing
 
 - Type checking extends `.claude-plugin/types/tsconfig.json`, which Claude Code writes the first time it loads the mod (the folder is gitignored). Load the mod once, for example with `claude --plugin-dir <this folder>`, then run `npx -p typescript tsc -p .`.
