@@ -68,6 +68,9 @@ jobs:
         run: git diff --exit-code -- dist/jervis-mcp.mjs
       - name: MCP acceptance (no provider is called)
         run: npx -y tsx@4.19.2 ci/mcp-smoke.ts
+      - name: The Antigravity plugin ships the same bundle
+        if: matrix.os == 'ubuntu-latest'
+        run: cmp dist/jervis-mcp.mjs integrations/antigravity/dist/jervis-mcp.mjs
       - name: The Codex plugin ships the same bundle
         if: matrix.os == 'ubuntu-latest'
         run: cmp dist/jervis-mcp.mjs integrations/codex/dist/jervis-mcp.mjs
