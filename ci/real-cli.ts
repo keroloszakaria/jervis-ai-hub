@@ -33,6 +33,7 @@ const $ = {
   })(),
   fs: {
     exists: async (path: string) => existsSync(path),
+    stat: async (path: string) => ({ kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: realpathSync.native(path) }),
     read: async (path: string) => readFileSync(path, 'utf8'),
     list: async (path: string) => readdirSync(path, { withFileTypes: true }).map(d => ({ name: d.name, kind: d.isDirectory() ? 'dir' : 'file' })),
     write: async (path: string, text: string) => {

@@ -8,9 +8,10 @@ import type { EngineInterface } from 'claude-code'
 import { begin, finish, redact, redactKeys } from './activity'
 import { clean, dirOf, errText, exe, onPath } from './cli'
 import { changedFiles, filesLine, guardEnv, LOCK_NOTE, refChanges, refusal, snapshot, workState } from './gitguard'
+import { hopEnv, hopRefusal } from './hops'
 import { resolveModel } from './models'
 import { provider } from './registry'
-import { checkUnknownSignIns, readiness } from './requests'
+import { checkUnknownSignIns, MAY_STILL_RUN, readiness, runStoppable } from './requests'
 
 // state this file reads (the scan needs each atom declared in the file that uses it)
 import { homeDir, joinPath, osName, pathSep, tempDir } from './platform'
@@ -91,6 +92,9 @@ export async function delegationSupport($: EngineInterface, id: string): Promise
  * Runs the relay. The caller has already confirmed with the person: this
  * changes files in `repo`.
  */
+/** How long a relay delegation may run before it is stopped. */
+export const RELAY_TIMEOUT_MS = 30 * 60_000
+
 export async function delegate(
   $: EngineInterface,
   id: string,
@@ -101,6 +105,8 @@ export async function delegate(
 ): Promise<DelegationResult> {
   const p = provider(id)
   if (!p?.relaySkill) return { isOk: false, text: 'This provider has no working relay adapter.' }
+  const loop = await hopRefusal($)
+  if (loop) return { isOk: false, status: 'policy', text: loop }
   await checkUnknownSignIns($, [id])
   const blocked = await readiness($, id)
   if (blocked) return { isOk: false, text: blocked }
@@ -152,17 +158,35 @@ export async function delegate(
   const model = pick.cliModel
 
   const actId = await begin($, { type: 'delegate', provider: id, model: c?.model, effort: pick.effort, mode: 'write', prompt: brief })
+  Object.assign(env, await hopEnv($, actId))
   const started = await $.clock.now()
   let stderr = ''
   let code: number | null = null
   try {
-    const stream = $.process.spawn({
-      argv: [node, script, '--brief', briefPath, '--cd', repo, '--out-dir', outDir, '--mode', 'workspace-write', ...(model ? ['--model', model] : [])],
-      cwd: repo,
-      env,
-    })
-    for await (const chunk of stream) if (chunk.stream === 'stderr') stderr += chunk.text
-    code = (await stream.result).code
+    // with a time limit, and stopped like any request (its activity's Stop)
+    const ran = await runStoppable(
+      $,
+      actId,
+      {
+        argv: [node, script, '--brief', briefPath, '--cd', repo, '--out-dir', outDir, '--mode', 'workspace-write', ...(model ? ['--model', model] : [])],
+        cwd: repo,
+        env,
+      },
+      RELAY_TIMEOUT_MS,
+    )
+    stderr = ran.stderr
+    code = ran.exitCode
+    if (ran.ended !== 'exit') {
+      const ms = (await $.clock.now()) - started
+      const why = ran.ended === 'cancelled' ? 'stopped' : `stopped after ${Math.round(RELAY_TIMEOUT_MS / 60_000)} minutes without finishing`
+      await finish($, actId, { state: ran.ended === 'cancelled' ? 'cancelled' : 'error', ms, error: why })
+      const files = opts.inCopy ? '' : `\n${filesLine(workBefore, before.isRepo ? await workState($, repo, workBefore) : undefined)}`
+      return {
+        isOk: false,
+        status: ran.ended,
+        text: `${p.label} relay was ${why}. Changes it made so far stay for review; nothing was retried.${ran.mayStillRun ? MAY_STILL_RUN : ''}${files}`,
+      }
+    }
   } catch (error) {
     const ms = (await $.clock.now()) - started
     await finish($, actId, { state: 'error', ms, error: errText(error) })
@@ -194,8 +218,8 @@ export async function delegate(
   const changed = refChanges(before, after)
   if (git.commitViolation === true && !changed.length) changed.push('the relay reports that HEAD changed')
   // the files changed, read by the hub's own git: the relay's own list is never used
-  const workAfter = before.isRepo ? await workState($, repo) : undefined
-  const touched = workBefore && workAfter ? changedFiles(workBefore, workAfter) : undefined
+  const workAfter = before.isRepo ? await workState($, repo, workBefore) : undefined
+  const touched = workBefore && workAfter && !workAfter.isGuardChanged ? changedFiles(workBefore, workAfter) : undefined
   const files = opts.inCopy ? '' : `\n${filesLine(workBefore, workAfter)}`
   if (changed.length) {
     const why = `git refs changed during the delegation: ${changed.join('; ')}`

@@ -34,16 +34,68 @@ export const isLimitsStale = (l: Limits | undefined, now: number): boolean => !l
 /** Whether a window has reset since it was read: what it said is used is used no more. */
 export const hasReset = (w: LimitWindow, now: number): boolean => w.resetsAt !== undefined && w.resetsAt <= now
 
+/** A window at or past this share used counts as spent. */
+export const SPENT_AT = 98
+/** A window at or past this share used counts as limited (still usable). */
+export const LIMITED_AT = 80
+
+/** Whether a window is spent now: read as nearly full, and not past its reset time. */
+export const isSpent = (w: LimitWindow, now: number): boolean => !hasReset(w, now) && w.usedPercent >= SPENT_AT
+
+const STOP_WORDS = new Set(['model', 'models', 'and', 'the', 'all'])
+const words = (s: string): string[] => s.toLowerCase().split(/[^a-z0-9.]+/).filter(x => x && !STOP_WORDS.has(x))
+
 /**
- * Whether a reading says the provider is at its limit now. An old reading says
- * nothing (unknown, not reached and not free), and a window past its reset
- * time no longer counts as used.
+ * Whether a window's model group covers a model, by whole words: "Gemini
+ * Models" covers gemini-4-argon; "Claude and GPT models" covers a Claude model
+ * or a GPT one. Each alternative's words must all be words of the model's id
+ * or label, so "pro" never matches "promo" and "3" never matches "gpt-4-32k".
+ * A window with no group covers every model (it is the account's).
  */
-export function isAtLimit(l: Limits | undefined, now: number): boolean {
-  if (!l || isLimitsStale(l, now)) return false
-  if (l.isBlocked) return true
+export function groupCovers(group: string | undefined, model: { id?: string; label?: string } | undefined): boolean {
+  if (!group) return true
+  if (!model) return false
+  const have = new Set([...words(model.id ?? ''), ...words(model.label ?? '')])
+  const alternatives = group.split(/\s+and\s+|,|\//i).map(words).filter(a => a.length)
+  return alternatives.some(alt => alt.every(w => have.has(w)))
+}
+
+/**
+ * What a reading says about a provider (or, given a model, about that model)
+ * now. Nothing is estimated: no reading is `unknown`, an old one `stale`, a
+ * provider that reports none `unsupported`; `exhausted` when the provider said
+ * it is blocked, when any window that covers the whole account is spent, or
+ * when every window that covers the model (or, for the provider, every model
+ * group) is spent; `limited` past 80%; else `available`.
+ */
+export type LimitState = 'available' | 'limited' | 'exhausted' | 'stale' | 'unknown' | 'unsupported'
+export function limitState(l: Limits | undefined, now: number, model?: { id?: string; label?: string }): LimitState {
+  if (!l || l.state === 'error' || (l.state === 'checking' && !l.windows?.length && !l.isBlocked)) return 'unknown'
+  if (l.state === 'unsupported') return 'unsupported'
+  if (isLimitsStale(l, now)) return 'stale'
+  if (l.isBlocked) return 'exhausted'
   const ws = l.windows ?? []
-  return ws.length > 0 && ws.every(w => !hasReset(w, now) && w.usedPercent >= 98)
+  if (!ws.length) return 'unknown'
+  const account = ws.filter(w => !w.group)
+  if (account.some(w => isSpent(w, now))) return 'exhausted'
+  const grouped = ws.filter(w => w.group)
+  if (model) {
+    // the account's windows cover every model; a group's only its own
+    const covering = ws.filter(w => groupCovers(w.group, model))
+    if (!covering.length) return 'unknown'
+    if (covering.some(w => isSpent(w, now))) return 'exhausted'
+    return covering.some(w => !hasReset(w, now) && w.usedPercent >= LIMITED_AT) ? 'limited' : 'available'
+  }
+  if (grouped.length) {
+    const groups = [...new Set(grouped.map(w => w.group!))]
+    if (groups.every(g => grouped.some(w => w.group === g && isSpent(w, now)))) return 'exhausted'
+  }
+  return ws.some(w => !hasReset(w, now) && w.usedPercent >= LIMITED_AT) ? 'limited' : 'available'
+}
+
+/** Whether a reading says the provider is at its limit now (see limitState). */
+export function isAtLimit(l: Limits | undefined, now: number): boolean {
+  return limitState(l, now) === 'exhausted'
 }
 
 /** Used shares that raise a toast, once per window and level. */

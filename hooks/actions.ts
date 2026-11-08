@@ -74,7 +74,7 @@ export async function askTool(
   const f = a.cwd ? await folder($, a.cwd) : undefined
   if (f?.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
   if (f && !(await allowProjectRead($, providerId, f.real, f.shown))) {
-    return { isOk: false, text: 'The person declined project access: nothing was sent.' }
+    return { isOk: false, text: 'Project access was not allowed (declined, or nobody could be asked): nothing was sent.' }
   }
   const r = await askWithFallback($, { provider: providerId, model, effort }, a.prompt, a.task, f?.real, a.level)
   const via = `${why ? `\n(${why})` : ''}${r.tried.length > 1 ? `\n(fell back after: ${r.tried.slice(0, -1).join(', ')})` : ''}${r.declined ? `\n(the person declined to let ${provider(r.declined)?.label ?? r.declined} ${f ? 'read the project' : 'take the prompt'}, so nothing was sent to it)` : ''}${r.stopped ? `\n(no other provider was tried after this failure (${ERROR_LABEL[r.stopped]}): only a limit, a network problem or an unavailable provider falls back)` : ''}`
@@ -131,6 +131,8 @@ export async function compareTool($: EngineInterface, prompt: string, providers?
   const ids = named ? [...new Set(providers)] : await candidates($)
   const isSmart = (await read($, settings)).smartRouting !== false
   const targets: { providerId: string; model?: string; effort?: string }[] = []
+  // a ready provider left out of an unnamed comparison is named, with why
+  const left: string[] = []
   for (const id of ids) {
     if (targets.length >= (named ? 5 : 4)) break
     if (!isSmart) {
@@ -141,13 +143,15 @@ export async function compareTool($: EngineInterface, prompt: string, providers?
     const pick = await smartPick($, task ?? 'general', { only: id, level })
     if ('route' in pick) targets.push({ providerId: id, model: pick.route.model, effort: pick.route.effort })
     else if (named) targets.push({ providerId: id })
+    else left.push(`${provider(id)?.label ?? id}: ${pick.reason}`)
   }
-  if (targets.length < 2) return { isOk: false, text: 'Comparing needs at least two ready providers.' }
+  const leftLine = left.length ? `\n\n_Left out: ${left.join('; ')}_` : ''
+  if (targets.length < 2) return { isOk: false, text: `Comparing needs at least two ready providers.${leftLine}` }
   const results = await compare($, targets, prompt, task)
   const text = results
     .map(r => `## ${header(r)}${r.isOk ? '' : ' (failed)'}\n${r.text}${usageLine(r.usage) ? `\n_${usageLine(r.usage)}_` : ''}`)
     .join('\n\n')
-  return { isOk: results.some(r => r.isOk), text }
+  return { isOk: results.some(r => r.isOk), text: text + leftLine }
 }
 
 /**
@@ -172,7 +176,7 @@ async function writeRun(
   }
   const direct = (await read($, settings)).writeDirect === true
   if (!(await allowWrite($, providerId, dir, a.how, f.shown, !direct))) {
-    return { isOk: false, text: a.type === 'delegate' ? 'The person declined: nothing was delegated.' : 'The person declined: no files were changed.' }
+    return { isOk: false, text: a.type === 'delegate' ? 'Not allowed (declined, or nobody could be asked): nothing was delegated.' : 'Not allowed (declined, or nobody could be asked): no files were changed.' }
   }
   const env = before.isRepo ? await guardEnv($, await osName($)) : undefined
   if (!direct) {
@@ -202,7 +206,7 @@ async function writeRun(
     }
   }
   // the files changed, as the hub's own git reads them
-  const files = filesLine(workBefore, before.isRepo ? await workState($, dir) : undefined)
+  const files = filesLine(workBefore, before.isRepo ? await workState($, dir, workBefore) : undefined)
   return { isOk: r.isOk, text: `${header(r)}\n${r.text}\n\n${files}${usageLine(r.usage) ? `\n\n(${usageLine(r.usage)})` : ''}` }
 }
 
@@ -319,7 +323,7 @@ export async function applyChangesTool($: EngineInterface, id: string): Promise<
   const run = await readRun($, id)
   if (!run) return { isOk: false, text: `No kept changes with run id "${id}" (they may have been applied, discarded, or removed after 7 days).` }
   // a run another session made applies only to this session's folder (or one inside it)
-  if (!isThisSessions(id)) {
+  if (!(await isThisSessions($, id))) {
     const here = await read($, cwd)
     const f = here ? await folder($, here) : undefined
     const os = await osName($)
@@ -355,7 +359,7 @@ export async function delegateTool($: EngineInterface, providerId: string, brief
   const f = await folder($, named)
   if (f.error !== undefined) return { isOk: false, text: `Refused: ${f.error}` }
   const direct = (await read($, settings)).writeDirect === true
-  if (!(await allowWrite($, providerId, f.real, 'Jervis Relay delegation', f.shown, !direct))) return { isOk: false, text: 'The person declined: nothing was delegated.' }
+  if (!(await allowWrite($, providerId, f.real, 'Jervis Relay delegation', f.shown, !direct))) return { isOk: false, text: 'Not allowed (declined, or nobody could be asked): nothing was delegated.' }
   try {
     if (!direct) {
       const before = await snapshot($, f.real)
