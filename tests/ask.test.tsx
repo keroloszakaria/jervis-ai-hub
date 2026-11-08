@@ -42,6 +42,8 @@ type World = {
   leakKeyInStderr: boolean
   /** what a failing Codex run prints on stdout (its JSON events) */
   execOut?: string
+  /** what Codex reports for its rate limits, in place of RATE */
+  rate?: string
   /** Codex's sign-in check: what `codex login status` says, or 'throws' when it cannot run */
   login?: string
   balanceAuth?: string
@@ -429,14 +431,14 @@ function respond(w: World, run: Run) {
     if (e.argv[0] === 'uname') return ok('Darwin\n')
     if (e.argv[0] === 'osascript') return ok(`${SECRET}\n`)
     if (e.argv[0] === 'security') return e.argv[1] === 'find-generic-password' ? ok(`${SECRET}\n`) : ok('')
-    if (e.argv[0] === 'sh') return ok(`${RATE}\n`)
+    if (e.argv[0] === 'sh') return ok(`${w.rate ?? RATE}\n`)
     if (e.argv[1] === 'session' && e.argv[2] === 'export') {
       return ok(JSON.stringify({ info: { id: e.argv[3], cost: 0.5, tokens: { input: 120, output: 30, reasoning: 0, cache: { read: 64, write: 0 } } } }))
     }
     if (e.argv[0] === 'powershell.exe') {
       // protect (stdin = plaintext), reveal (stdin = cipher), prompt (no stdin)
       if (run.stdin === CIPHER) return ok(SECRET)
-      if (psScript(e.argv).includes('account/rateLimits/read')) return ok(`${RATE}\n`)
+      if (psScript(e.argv).includes('account/rateLimits/read')) return ok(`${w.rate ?? RATE}\n`)
       return ok(CIPHER)
     }
     if (a.includes('login status')) {
@@ -1220,6 +1222,49 @@ test('"Allow this session" covers that provider for the session only; another se
   await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'c' } as never)
   expect(w.asked.length).toBe(2)
   expect(w.ran.filter(x => x.argv.includes('run')).length).toBe(2)
+})
+
+// Codex alone, with every window it reports nearly spent; resetsAt is in seconds, the clock starts at 1_000_000 ms
+const SPENT = (resetsAt: number) =>
+  JSON.stringify({ id: 2, result: { rateLimits: { primary: { usedPercent: 99, windowDurationMins: 300, resetsAt }, secondary: { usedPercent: 99, windowDurationMins: 10080, resetsAt }, planType: 'plus' } } })
+const CODEX_ONLY = () => ({ 'config-v2': { chatgpt: { isConnected: true, isEnabled: true, model: 'gpt-6-sol' } } })
+
+for (const smartRouting of [true, false]) {
+  test(`a window past its reset time no longer leaves the provider out (smart routing ${smartRouting ? 'on' : 'off'})`, async ($, on) => {
+    const w = world({ ...CODEX_ONLY(), 'hub-settings-v1': { ...DEFAULT_SETTINGS, smartRouting } })
+    w.rate = SPENT(1100)
+    engine(on, w)
+    await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+    await settle(80)
+    const before = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'general', prompt: 'q', preview: true } as never))
+    expect(before).toContain('No provider to route to')
+    // past 1100 s: both windows have reset
+    w.now = 1_100_001
+    const after = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'general', prompt: 'q', preview: true } as never))
+    expect(after).toContain('Provider: ChatGPT (Codex)')
+    const ui = await $.ui.mount({ ...PANE(), surface: 'desktop' })
+    expect(await ui.find({ type: 'Text', text: /reset since this reading/ })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
+test('an old limits reading decides nothing: it is shown as old, and the reason says the limits are unknown', async ($, on) => {
+  const w = world(CODEX_ONLY())
+  w.rate = SPENT(99_999)
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(80)
+  const fresh = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'general', prompt: 'q', preview: true } as never))
+  expect(fresh).toContain('No provider to route to')
+  // 31 minutes later the reading is too old to leave Codex out, and is not taken as 0% used either
+  w.now = 1_000_000 + 31 * 60_000
+  const old = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'general', prompt: 'q', preview: true } as never))
+  expect(old).toContain('Provider: ChatGPT (Codex)')
+  expect(old).toContain('limits not read recently, so unknown')
+  expect(old).not.toContain('of plan left')
+  const ui = await $.ui.mount({ ...PANE(), surface: 'desktop' })
+  expect(await ui.find({ text: /Read 31 min ago, so it may be out of date/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('a CLI installed by npm is run through the script its shim names, never through a shell', async ($, on) => {

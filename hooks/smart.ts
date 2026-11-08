@@ -8,6 +8,7 @@ import type { EngineInterface } from 'claude-code'
 import type { Capability, Level, Limits, ModelInfo, Route, Task } from '../types'
 import { effortForLevel, nearLevel, rate } from './levels'
 import { EFFORT_ORDER, favKey, hasCapability } from './models'
+import { hasReset, isLimitsStale } from './limits'
 import { provider } from './registry'
 import { readiness } from './requests'
 import { DEFAULT_SETTINGS } from './state'
@@ -34,16 +35,19 @@ export function effortFor(m: ModelInfo, task: Task): string | undefined {
   return undefined
 }
 
-/** How much of the tightest reported window is used, for the windows that cover this model. */
-function usedFor(l: Limits | undefined, m: ModelInfo | undefined): number | undefined {
-  if (!l?.windows?.length) return undefined
+/**
+ * How much of the tightest reported window is used, for the windows that cover
+ * this model: unknown for an old reading, and nothing for a window that has reset.
+ */
+function usedFor(l: Limits | undefined, m: ModelInfo | undefined, now: number): number | undefined {
+  if (!l?.windows?.length || isLimitsStale(l, now)) return undefined
   const name = `${m?.label ?? ''} ${m?.id ?? ''}`.toLowerCase()
   const covers = l.windows.filter(w => {
     if (!w.group) return true
     const words = w.group.toLowerCase().split(/[^a-z0-9]+/).filter(x => x && !['models', 'and', 'model'].includes(x))
     return words.some(x => name.includes(x))
   })
-  return covers.length ? Math.max(...covers.map(w => w.usedPercent)) : undefined
+  return covers.length ? Math.max(...covers.map(w => (hasReset(w, now) ? 0 : w.usedPercent))) : undefined
 }
 
 /**
@@ -75,6 +79,7 @@ async function pickOnce(
   const hl = await read($, health)
   const lims = await read($, limits)
   const all = await read($, models)
+  const now = await $.clock.now()
   const needs = opts.needs ?? (task === 'vision' ? ['image-input'] : [])
   type Cand = { id: string; m?: ModelInfo; score: number; why: string[]; cost?: number }
   const cands: Cand[] = []
@@ -85,7 +90,8 @@ async function pickOnce(
     const p = provider(id)
     if (!p) continue
     const l = lims[id]
-    if (l?.isBlocked) continue
+    const old = l !== undefined && (l.windows?.length || l.isBlocked) && isLimitsStale(l, now)
+    if (l?.isBlocked && !old) continue
     const list = all[id]?.models ?? []
     const pool: (ModelInfo | undefined)[] = list.length ? list : [undefined]
     for (const m of pool) {
@@ -93,7 +99,7 @@ async function pickOnce(
       if (!m && needs.length) continue
       // a level asks for a model whose reported facts (or the person's choice) serve it
       if (level && (!m || !rate(m, set[favKey(id, m.id)]).levels.includes(level))) continue
-      const used = usedFor(l, m)
+      const used = usedFor(l, m, now)
       if (used !== undefined && used >= 98) continue
       const why: string[] = []
       let score = 0
@@ -147,6 +153,7 @@ async function pickOnce(
         score += task === 'general' ? 3 : 1
         if (task === 'general') why.push('your chosen model')
       }
+      if (old) why.push('limits not read recently, so unknown')
       if (used !== undefined) {
         score += 2 * (1 - used / 100)
         why.push(`${Math.round(100 - used)}% of plan left`)

@@ -6,6 +6,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Capability, Level, Route, Routes, Task } from '../types'
 import { hasCapability } from './models'
+import { isAtLimit } from './limits'
 import { ERROR_LABEL, type ErrorKind, mayFallBack } from './cli'
 import { allowFallback, allowProjectRead } from './permissions'
 import { begin, finish } from './activity'
@@ -34,13 +35,13 @@ export async function candidates($: EngineInterface): Promise<string[]> {
   const cfg = await read($, config)
   const h = await read($, health)
   const lims = await read($, limits)
+  const now = await $.clock.now()
   const ready: string[] = []
   for (const p of PROVIDERS) {
     if (!cfg[p.id]?.isConnected || !cfg[p.id]?.isEnabled) continue
     if (await readiness($, p.id)) continue
-    const l = lims[p.id]
-    // reached: the provider said so, or every window it reported is spent
-    if (l?.isBlocked || (l?.windows?.length && l.windows.every(w => w.usedPercent >= 98))) continue
+    // reached: the provider said so, or every window it reported is spent and not reset; an old reading decides nothing
+    if (isAtLimit(lims[p.id], now)) continue
     ready.push(p.id)
   }
   const score = (id: string) => (h[id]?.lastTest?.isOk ? 0 : h[id]?.lastTest ? 2 : 1)

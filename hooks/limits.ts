@@ -21,6 +21,31 @@ const settings = atom({ plugin: 'ai-subscriptions', key: 'settings' } as const, 
 
 /** A provider's limits are read again at most this often, unless the person presses Refresh. */
 export const MIN_GAP_MS = 60_000
+/**
+ * A limits reading older than this no longer steers the router: its windows
+ * may have reset or filled since. It is shown as old, and read again on Refresh
+ * or after the provider's next request.
+ */
+export const LIMITS_TTL_MS = 30 * 60_000
+
+/** Whether a reading is too old to decide anything by. */
+export const isLimitsStale = (l: Limits | undefined, now: number): boolean => !l || now - l.at > LIMITS_TTL_MS
+
+/** Whether a window has reset since it was read: what it said is used is used no more. */
+export const hasReset = (w: LimitWindow, now: number): boolean => w.resetsAt !== undefined && w.resetsAt <= now
+
+/**
+ * Whether a reading says the provider is at its limit now. An old reading says
+ * nothing (unknown, not reached and not free), and a window past its reset
+ * time no longer counts as used.
+ */
+export function isAtLimit(l: Limits | undefined, now: number): boolean {
+  if (!l || isLimitsStale(l, now)) return false
+  if (l.isBlocked) return true
+  const ws = l.windows ?? []
+  return ws.length > 0 && ws.every(w => !hasReset(w, now) && w.usedPercent >= 98)
+}
+
 /** Used shares that raise a toast, once per window and level. */
 export const ALERT_LEVELS = [80, 95] as const
 
@@ -282,7 +307,7 @@ async function readLimits($: EngineInterface, id: string, force: boolean): Promi
     await update($, limits, l => ({ ...l, [id]: { at: now, state: 'unsupported' as const, source: unsupportedReason(id) } }))
     return
   }
-  await update($, limits, l => ({ ...l, [id]: { ...(l[id] ?? { source: '' }), at: now, state: 'checking' as const } }))
+  await update($, limits, l => ({ ...l, [id]: { ...(l[id] ?? { source: '' }), at: l[id]?.at ?? now, state: 'checking' as const } }))
   let out: Limits
   try {
     out = p.kind === 'codex' ? await readCodex($, now) : p.kind === 'agy' ? await readAgy($, now) : await readKey($, id, reader!, now)

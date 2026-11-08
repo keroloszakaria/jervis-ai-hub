@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.10
+
+Old limit readings stop steering the router:
+
+- **A window past its reset time no longer counts:** a provider whose reported windows have all reset since they were read is routed to again. The Limits view shows "reset since this reading" in place of the old share.
+- **A reading older than 30 minutes decides nothing:** it neither leaves a provider out nor counts as free. The smart pick's reason says "limits not read recently, so unknown" and gives no share of the plan left. The Limits view marks the reading as old and offers Refresh.
+- **A reading under way keeps its time:** while limits are read again, the old windows stay marked with the time they were read, so they do not look new.
+- **Tests:** on a set clock, windows before and after their reset (Smart routing on and off), and a reading 31 minutes old.
+
 ## 0.10.9
 
 Consent before a prompt moves to another provider:

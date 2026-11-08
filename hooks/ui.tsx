@@ -11,7 +11,7 @@ import { clearActivity, exportActivity, snip, stats } from './activity'
 import { SUBAGENT_MODELS, SUBAGENT_TYPES, recentSpawns, subagentModels } from './subagents'
 import { LEVELS, LEVEL_LABEL, LEVEL_USE, levelTag, rate } from './levels'
 import { runDiagnostics } from './diagnostics'
-import { refreshAllLimits, refreshLimits } from './limits'
+import { hasReset, isLimitsStale, refreshAllLimits, refreshLimits } from './limits'
 import { STATUS_COLOR, connect, disconnect, status, test } from './health'
 import type { Status } from './health'
 import { CAPABILITIES, EFFORT_LABEL, capabilityList, favKey, hasCapability, isModelListStale, refreshModels, resolveModel } from './models'
@@ -360,7 +360,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
       <Box flexDirection="row" justifyContent="space-between" gap={1}>
         <Text size="footnote">{label}</Text>
         <Text size="footnote" mono tabular color={pctColor(pct)}>
-          {`${Math.round(pct)}% used${resetsAt ? ` · resets in ${until(now, resetsAt)}` : ''}`}
+          {resetsAt !== undefined && resetsAt <= now ? 'reset since this reading' : `${Math.round(pct)}% used${resetsAt ? ` · resets in ${until(now, resetsAt)}` : ''}`}
         </Text>
       </Box>
       {Svg ? (
@@ -393,6 +393,9 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
     ]
     return (
       <Box flexDirection="column">
+        {(l.windows?.length || l.isBlocked) && isLimitsStale(l, now) ? (
+          <Hint text={`Read ${Math.round((now - l.at) / 60_000)} min ago, so it may be out of date and does not steer routing. Refresh to read it again.`} />
+        ) : null}
         {l.isBlocked ? (
           <Text size="footnote" weight="semibold" color="error">
             Limit reached
@@ -407,7 +410,7 @@ export async function renderPane($: EngineInterface, els: Els, cols: number) {
                 </Text>
               </Box>
             ) : null}
-            <Meter label={`${w.label} limit`} pct={w.usedPercent} resetsAt={w.resetsAt} />
+            <Meter label={`${w.label} limit`} pct={hasReset(w, now) ? 0 : w.usedPercent} resetsAt={w.resetsAt} />
           </Box>
         ))}
         {lines.map(t => (
