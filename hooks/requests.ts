@@ -7,7 +7,8 @@ import type { EngineInterface } from 'claude-code'
 import type { ActivityType, Mode, Task, Usage } from '../types'
 import { begin, finish, redact, redactKeys } from './activity'
 import { checkAuth, revealForRequest } from './auth'
-import { ERROR_LABEL, type ErrorKind, MAX_ARG_PROMPT, argvOf, classifyError, codexIsolation, errText, exe, invocation, isolationProblem, parse, parseOpencodeExport, sandboxDir, timeoutFor } from './cli'
+import { ERROR_LABEL, type ErrorKind, argvOf, classifyError, codexIsolation, errText, exe, invocation, isolationProblem, parse, parseOpencodeExport, sandboxDir, timeoutFor } from './cli'
+import { hopEnv, hopRefusal, selfProvider } from './hops'
 import { resolveModel } from './models'
 import { osName } from './platform'
 import type { OsName } from './platform'
@@ -82,7 +83,20 @@ export function stopRequest(activityId: string): boolean {
 /** Activity ids of the requests running now. */
 export const runningIds = (): string[] => [...running.keys()]
 
-type Ran = { exitCode: number; stdout: string; stderr: string; ended: 'exit' | 'timeout' | 'cancelled' }
+export type Ran = {
+  exitCode: number
+  stdout: string
+  stderr: string
+  ended: 'exit' | 'timeout' | 'cancelled'
+  /** stopped, but the engine did not confirm the child ended within KILL_WAIT_MS */
+  mayStillRun?: boolean
+}
+
+/** How long a stop waits for the engine to say the child ended. */
+export const KILL_WAIT_MS = 5000
+
+/** What an answer adds when a stopped CLI may still be running. */
+export const MAY_STILL_RUN = ' The hub asked for the CLI to be ended but could not confirm it ended: it may still be running, so check your running processes.'
 
 const CAP = 4 * 1024 * 1024
 
@@ -90,7 +104,7 @@ const CAP = 4 * 1024 * 1024
  * Runs one CLI and reads what it writes, until it exits, its deadline passes
  * or the person stops it. Leaving the stream ends the child.
  */
-async function runStoppable(
+export async function runStoppable(
   $: EngineInterface,
   activityId: string,
   req: { argv: string[]; cwd: string; env?: Record<string, string>; input?: string },
@@ -134,8 +148,18 @@ async function runStoppable(
     for (;;) {
       const step = await Promise.race([stream.next(), stopped])
       if (typeof step === 'string') {
-        void stream.return(undefined as never).catch(() => undefined)
-        return { exitCode: 1, stdout, stderr, ended: step }
+        // leaving the stream ends the child; waited on, a little, so the answer can say whether it did
+        const ended = await Promise.race([
+          stream.return(undefined as never).then(
+            () => true,
+            () => true,
+          ),
+          $.clock.sleep(KILL_WAIT_MS).then(
+            () => false,
+            () => false,
+          ),
+        ])
+        return { exitCode: 1, stdout, stderr, ended: step, ...(ended ? {} : { mayStillRun: true }) }
       }
       if (step.done) return { exitCode: step.value.code ?? 1, stdout, stderr, ended: 'exit' }
       bytes += step.value.text.length
@@ -222,6 +246,8 @@ export async function checkUnknownSignIns($: EngineInterface, ids?: string[]): P
 export async function readiness($: EngineInterface, id: string): Promise<string | undefined> {
   const p = provider(id)
   if (!p) return `Unknown provider "${id}".`
+  // the agent the hub runs inside is never sent a request from here: no loops back to it
+  if ((await selfProvider($)) === id) return `${p.label} is the agent this hub runs inside, so the hub does not send it requests.`
   const c = (await read($, config))[id]
   if (!c?.isConnected) return `${p.label} is not connected.`
   if (!c.isEnabled) return `${p.label} is disabled in Jervis AI Hub.`
@@ -255,12 +281,12 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
   // nothing was sent: either this provider cannot take the request now, or the hub refused it (a refusal is not fallen back from)
   const fail = (text: string, errorKind: ErrorKind = 'unavailable'): RequestResult => ({ isOk: false, provider: a.providerId, model, effort, text, ms: 0, errorKind })
   if (!p) return fail(`Unknown provider "${a.providerId}".`)
+  // a hub inside an agent a hub started sends nothing on: no loops
+  const loop = await hopRefusal($)
+  if (loop) return fail(loop, 'policy')
   await checkUnknownSignIns($, [a.providerId])
   const blocked = await readiness($, a.providerId)
   if (blocked) return fail(blocked)
-  if (p.kind === 'agy' && a.prompt.length > MAX_ARG_PROMPT) {
-    return fail(`Antigravity takes the prompt on its command line, which the system caps; this prompt is ${a.prompt.length} characters (limit ${MAX_ARG_PROMPT}).`)
-  }
   const path = await exe($, p.kind)
   if (!path) return fail(`${p.label}: its CLI was not found.`)
   // rules the hub cannot confirm for this version are no rules at all: refuse
@@ -308,7 +334,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
     const runDir = a.cwd ?? (await sandboxDir($))
     // PWD names the run's folder too: OpenCode takes its folder from PWD before the process's
     // own, so a PWD inherited from the shell Claude started in would root it in that project
-    env = { ...inv.env, ...a.env, ...env, PWD: runDir }
+    env = { ...inv.env, ...a.env, ...env, ...(await hopEnv($, id)), PWD: runDir }
     const timeoutMs = timeoutFor(a.type, a.mode)
     const r = await runStoppable($, id, { argv, input: stdin, env, cwd: runDir }, timeoutMs)
     env = undefined
@@ -318,7 +344,7 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
         r.ended === 'cancelled'
           ? 'stopped by the person'
           : `stopped after ${Math.round(timeoutMs / 60_000)} minutes without finishing`
-      const left = a.mode === 'write' ? ' Changes it made so far stay in the folder for review; nothing was retried.' : ''
+      const left = (a.mode === 'write' ? ' Changes it made so far stay in the folder for review; nothing was retried.' : '') + (r.mayStillRun ? MAY_STILL_RUN : '')
       await finish($, id, { state: r.ended === 'cancelled' ? 'cancelled' : 'error', ms, error: why })
       await announce($, p.label, ms, r.ended)
       return { isOk: false, provider: a.providerId, model, effort, text: `${p.label}: ${why}.${left}`, ms, errorKind: r.ended, activityId: id }

@@ -153,7 +153,7 @@ async function startIn($: EngineInterface, a: StartArgs, id: string, full: strin
   owner.set(id, await sessionOf($))
   const s = await read($, settings)
   const at = await $.clock.now()
-  const base: Job = { id, title: a.title, level: a.level, runner: 'other-ai', state: 'running', startedAt: at }
+  const base: Job = { id, title: a.title, level: a.level, runner: 'other-ai', state: 'running', startedAt: at, session: owner.get(id) || undefined }
 
   // where it runs: the runner asked for; on auto, another AI that serves the level, else a subagent
   if (a.runner !== 'subagent') await checkUnknownSignIns($, a.provider ? [a.provider] : undefined)
@@ -165,7 +165,7 @@ async function startIn($: EngineInterface, a: StartArgs, id: string, full: strin
     const f = a.cwd ? await folder($, a.cwd) : undefined
     if (f?.error !== undefined) return { error: f.error }
     if (f && !(await allowProjectRead($, r.provider, f.real, f.shown))) {
-      return { error: `The person declined to let ${provider(r.provider)?.label ?? r.provider} read the project: the job was not started.` }
+      return { error: `Reading the project was not allowed for ${provider(r.provider)?.label ?? r.provider} (declined, or nobody could be asked): the job was not started.` }
     }
     const job: Job = { ...base, runner: 'other-ai', provider: r.provider, model: r.model, effort: r.effort }
     await update($, jobs, l => [...l, job])
@@ -268,7 +268,7 @@ async function endJob(
   // may reach another conversation (a job from before a reload has no owner
   // here; it stays this session's)
   if (started !== undefined && started !== session) {
-    await patch($, id, j => ({ ...j, state, endedAt: at, summary: 'its session ended before it did; the result was dropped' }))
+    await patch($, id, j => ({ ...j, state, endedAt: at, summary: 'its session ended before it did; the result was dropped', isNote: true }))
     return
   }
   // a subagent may have read a key from the project; another AI's answer was cleaned already
@@ -307,6 +307,40 @@ export async function stopJob($: EngineInterface, id: string): Promise<boolean> 
 /** Hides the ended jobs from the band; their results stay readable. */
 export async function clearEnded($: EngineInterface): Promise<void> {
   await update($, jobs, l => l.map(j => (j.state === 'running' ? j : { ...j, isCleared: true })))
+}
+
+/** What a row from an earlier session shows instead of a piece of its result. */
+export const EARLIER_SESSION = 'it belonged to an earlier session, so its result is not shown here'
+/** What a job on another AI that was running when the hub reloaded says. */
+export const LOST_IN_RELOAD = 'the hub reloaded while it ran, so its result was lost; start it again if you still need it'
+
+/**
+ * At the start of a session (a reload included): a job on another AI that this
+ * module is not running is not running at all (the hub reloaded under it), so it
+ * ends as failed and frees its slot; and a row another session started keeps no
+ * piece of its result, so nothing of one conversation shows in the next.
+ */
+export async function settleJobs($: EngineInterface): Promise<void> {
+  const sid = await sessionOf($)
+  const at = await $.clock.now()
+  await update($, jobs, l => settleRows(l, sid, id => active.has(id) || owner.has(id), at) ?? l)
+}
+
+/** settleJobs on the rows alone: the rows to keep, or undefined when none changed. */
+export function settleRows(l: Job[], sid: string, isRunHere: (id: string) => boolean, at: number): Job[] | undefined {
+  let isChanged = false
+  const next = l.map(j => {
+    if (j.state === 'running' && j.runner === 'other-ai' && !isRunHere(j.id)) {
+      isChanged = true
+      return { ...j, state: 'failed' as const, endedAt: at, summary: LOST_IN_RELOAD, isNote: true }
+    }
+    if (j.state !== 'running' && j.session && j.session !== sid && !j.isNote) {
+      isChanged = true
+      return { ...j, summary: EARLIER_SESSION, isNote: true }
+    }
+    return j
+  })
+  return isChanged ? next : undefined
 }
 
 export async function allJobs($: EngineInterface): Promise<Job[]> {

@@ -8,7 +8,7 @@ import type { EngineInterface } from 'claude-code'
 import type { Capability, Level, Limits, ModelInfo, Route, Task } from '../types'
 import { effortForLevel, nearLevel, rate } from './levels'
 import { EFFORT_ORDER, favKey, hasCapability } from './models'
-import { hasReset, isLimitsStale } from './limits'
+import { groupCovers, hasReset, isLimitsStale, isSpent } from './limits'
 import { provider } from './registry'
 import { readiness } from './requests'
 import { DEFAULT_SETTINGS } from './state'
@@ -41,12 +41,8 @@ export function effortFor(m: ModelInfo, task: Task): string | undefined {
  */
 function usedFor(l: Limits | undefined, m: ModelInfo | undefined, now: number): number | undefined {
   if (!l?.windows?.length || isLimitsStale(l, now)) return undefined
-  const name = `${m?.label ?? ''} ${m?.id ?? ''}`.toLowerCase()
-  const covers = l.windows.filter(w => {
-    if (!w.group) return true
-    const words = w.group.toLowerCase().split(/[^a-z0-9]+/).filter(x => x && !['models', 'and', 'model'].includes(x))
-    return words.some(x => name.includes(x))
-  })
+  const covers = l.windows.filter(w => groupCovers(w.group, m))
+  if (covers.some(w => isSpent(w, now))) return 100
   return covers.length ? Math.max(...covers.map(w => (hasReset(w, now) ? 0 : w.usedPercent))) : undefined
 }
 
@@ -57,11 +53,13 @@ function usedFor(l: Limits | undefined, m: ModelInfo | undefined, now: number): 
 export async function smartPick(
   $: EngineInterface,
   task: Task,
-  opts: { only?: string; needs?: Capability[]; level?: Level } = {},
+  opts: { only?: string; needs?: Capability[]; level?: Level; strictLevel?: boolean } = {},
 ): Promise<SmartPick | { reason: string }> {
   if (!opts.level) return pickOnce($, task, opts)
   const exact = await pickOnce($, task, opts)
   if ('route' in exact) return exact
+  // heavy work (security, architecture, incidents, migrations) never steps down to a weaker level unless asked to
+  if (opts.strictLevel ?? opts.level === 'heavy') return { reason: `${exact.reason}; heavy work is not stepped down to a weaker level` }
   // nothing ready serves that level: the one next to it, said in the reason
   const near = nearLevel(opts.level)
   const other = await pickOnce($, task, { ...opts, level: near })
@@ -181,7 +179,9 @@ async function pickOnce(
     if (level) return { reason: `no ready model${opts.only ? ` of ${provider(opts.only)?.label ?? opts.only}` : ''} serves ${level} work` }
     return { reason: needs.length ? `no ready model reports ${needs.join(', ')}` : opts.only ? `${provider(opts.only)?.label ?? opts.only} is not ready` : 'no provider is connected and ready' }
   }
-  const best = cands.reduce((a, b) => (b.score > a.score ? b : a))
+  // a tie goes the same way every time: your plan before a paid key, then by provider and model id
+  const order = (c: Cand) => `${provider(c.id)?.billing === 'api' ? 1 : 0}|${c.id}|${c.m?.id ?? ''}`
+  const best = cands.reduce((a, b) => (b.score > a.score || (b.score === a.score && order(b) < order(a)) ? b : a))
   const p = provider(best.id)
   const effort = best.m ? (level ? effortForLevel(best.m, level) : effortFor(best.m, task)) : undefined
   const what = level ? `${level} work${task !== 'general' ? ` (${task})` : ''}` : task

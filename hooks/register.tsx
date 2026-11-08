@@ -17,7 +17,7 @@ import { PROVIDERS, TASKS, provider } from './registry'
 import { STORE, loadPersisted, saveConfig } from './state'
 import { LEVELS, LEVEL_USE, isLevel } from './levels'
 import { GUIDE_ID, guideText } from './guide'
-import { endSessionJobs, jobStatus, onAgentTurn, startJob } from './jobs'
+import { endSessionJobs, jobStatus, onAgentTurn, settleJobs, startJob } from './jobs'
 import { renderBand } from './band'
 import { currentRules, recordSpawn, ruleFor } from './subagents'
 import { BG, renderPane } from './ui'
@@ -238,6 +238,8 @@ export const register: Register = on => {
     await update($, cwd, () => e.cwd)
     await loadPersisted($)
     await migrate($)
+    // jobs left running by a reload end as failed; an earlier session's results stay out of this one
+    await settleJobs($).catch(() => undefined)
     await $.command.register({
       name: 'ai-providers',
       description: 'Open Jervis AI Hub: connect AI providers, pick models, route, compare and review activity',

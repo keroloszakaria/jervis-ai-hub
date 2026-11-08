@@ -5,7 +5,9 @@ import { isModelListStale } from '../hooks/models'
 import { canonicalDir } from '../hooks/permissions'
 import { redactKeys, snipWords } from '../hooks/activity'
 import { changedFiles, parentOf, parseRefs, parseStatus, refChanges, undoHint } from '../hooks/gitguard'
-import { AGY_READ_SETTINGS, parse, parseVersion, versionNote } from '../hooks/cli'
+import { AGY_READ_SETTINGS, agyStdin, invocation, parse, parseVersion, versionNote } from '../hooks/cli'
+import { groupCovers, limitState } from '../hooks/limits'
+import { LOST_IN_RELOAD, settleRows } from '../hooks/jobs'
 import { duration, size } from '../hooks/requests'
 import { effortForLevel, levelTag, rate } from '../hooks/levels'
 import type { ModelInfo } from '../types'
@@ -63,6 +65,10 @@ type World = {
   reversed?: string
   /** the provider CLI never answers (until stopped) */
   hang?: boolean
+  /** variables the host's environment holds, over the defaults */
+  envVars?: Record<string, string>
+  /** the relay of a delegation never ends */
+  hangRelay?: boolean
   instantTimeout?: boolean
   /** the clock; 1_000_000 when absent */
   now?: number
@@ -212,7 +218,9 @@ function engine(on: any, w: World) {
     return { value: undefined }
   })
   on('env.get', (_: unknown, e: { name: string }) =>
-    w.os === 'mac'
+    w.envVars && e.name in w.envVars
+      ? { value: w.envVars[e.name] }
+      : w.os === 'mac'
       ? { value: e.name === 'HOME' ? '/Users/me' : e.name === 'TMPDIR' ? '/tmp/' : e.name === 'PATH' ? '/usr/bin' : undefined }
       : { value: e.name === 'TEMP' ? 'C:\\Temp' : 'C:\\Local' },
   )
@@ -248,7 +256,7 @@ function engine(on: any, w: World) {
   )
   on('process.spawn', async function* (_: unknown, e: { argv: string[]; cwd?: string; env?: Record<string, string>; input?: string }) {
     const r = respond(w, { argv: [...e.argv], cwd: e.cwd, env: e.env, stdin: e.input }).value
-    if (w.hang && (e.argv[1] === 'exec' || e.argv[1] === 'run')) {
+    if ((w.hang && (e.argv[1] === 'exec' || e.argv[1] === 'run')) || (w.hangRelay && e.argv.includes('--brief'))) {
       if (w.partial) yield { stream: 'stdout' as const, text: w.partial }
       await new Promise(() => undefined)
     }
@@ -260,7 +268,7 @@ function engine(on: any, w: World) {
   on('clock.sleep', (_: unknown, e: { ms: number }) =>
     e.ms === 1000
       ? new Promise(resolve => void (w.ticks ??= []).push(() => resolve({ value: undefined })))
-      : w.instantTimeout
+      : w.instantTimeout || e.ms === 5000
         ? { value: undefined }
         : new Promise(() => undefined),
   )
@@ -384,7 +392,8 @@ function respond(w: World, run: Run) {
     if (e.argv[0] === 'git' && !w.git) return ok('', 'fatal: not a git repository (or any of the parent directories): .git\n', 128)
     if (e.argv[0] === 'git' && w.git) {
       const g = w.git
-      const sub = e.argv.slice(3).join(' ')
+      // what follows `-C <repo>`, past the hub's own -c flags
+      const sub = e.argv.slice(e.argv.indexOf('-C') + 2).join(' ')
       if (sub === 'rev-parse --is-inside-work-tree') return ok('true\n')
       if (sub.startsWith('rev-parse --verify')) return ok(`${g.head}\n`)
       if (sub.startsWith('symbolic-ref')) return g.branch ? ok(`${g.branch}\n`) : ok('', '', 1)
@@ -394,7 +403,7 @@ function respond(w: World, run: Run) {
         // a rename names its old path after the new one
         return ok(Object.entries(w.work ?? {}).map(([f, [xy]]) => (xy.includes('R') ? `${xy} ${f.split('<-')[0]}\0${f.split('<-')[1]}` : `${xy} ${f}`)).join('\0'))
       }
-      if (sub === 'hash-object --stdin-paths') {
+      if (sub === 'hash-object --no-filters --stdin-paths') {
         const work = Object.fromEntries(Object.entries(w.work ?? {}).map(([f, v]) => [f.split('<-')[0]!, v]))
         return ok((run.stdin ?? '').split('\n').filter(Boolean).map(f => `hash-of-${work[f]?.[1] ?? 'nothing'}`).join('\n') + '\n')
       }
@@ -1014,6 +1023,8 @@ test('Stop ends a running request, which reads as stopped and is not retried', a
   await ui.press({ key: `stop-${id}` })
   const r = await call
   expect(JSON.stringify(r)).toContain('stopped by the person')
+  // H-03: a child that never answers is not called ended: this test's CLI cannot be ended, and the answer says so
+  expect(JSON.stringify(r)).toContain('may still be running')
   expect((w.store['hub-activity-v1'] as { state: string }[]).pop()?.state).toBe('cancelled')
   expect(w.ran.some(x => x.argv[1] === 'run')).toBe(false)
   expect(await ui.find({ key: `stop-${id}` })).toBeUndefined()
@@ -2128,6 +2139,10 @@ test('two runs that end together are reviewed one after the other, each with its
   expect(w.paneLog).toEqual(['open', 'close', 'open', 'close'])
   const ids = [a, b].map(x => /run (run-\d+-[0-9a-f]{16})/.exec(JSON.stringify(x))?.[1])
   expect(ids[0]).not.toBe(ids[1])
+  // W-01: both records are kept, neither write lost the other's
+  const kept = Object.keys((w.store['hub-work-runs-v1'] ?? {}) as Record<string, unknown>)
+  expect(kept).toContain(ids[0])
+  expect(kept).toContain(ids[1])
 })
 
 test("a run another session kept applies only to this session's folder", async ($, on) => {
@@ -2609,4 +2624,246 @@ test('in English the pane keeps its rows as written', async ($, on) => {
   expect(json).not.toContain('row-reverse')
   expect(json.includes('\u2067')).toBe(false)
   await ui.unmount()
+})
+
+// ---------- core hardening (docs/audits/CORE_HARDENING_AUDIT.md) ----------
+
+// H-01: Antigravity's prompt goes on stdin, never on its command line
+test('H-01 Antigravity gets its prompt on stdin, whatever its size or script', () => {
+  const prompts = ['sensitive words here', 'سطر أول\nline two\n\ttabbed "quoted" \\ back', '😀 emoji and CJK 漢字', 'x'.repeat(200_000)]
+  for (const prompt of prompts) {
+    for (const mode of ['read', 'write'] as const) {
+      const inv = invocation('agy', 'C:\\agy.exe', prompt, mode, 'gem-pro-high')
+      expect(inv.argv.some(a => a.includes(prompt.slice(0, 12)))).toBe(false)
+      expect(inv.argv).toContain('-p=')
+      expect(inv.argv.join(' ')).toContain('--input-format stream-json --output-format stream-json')
+      const msg = JSON.parse(inv.stdin!.trim()) as { event: string; message: { content: string } }
+      expect(msg.event).toBe('user')
+      expect(msg.message.content).toBe(prompt)
+      expect(inv.stdin!.endsWith('\n')).toBe(true)
+      expect(inv.stdin!.trim().includes('\n')).toBe(false)
+    }
+  }
+  expect(agyStdin('a\nb')).toBe('{"event":"user","message":{"role":"user","content":"a\\nb"}}\n')
+})
+
+test('H-01 Antigravity stream-json output is read from its result event, success and failure', () => {
+  const ok = [
+    '{"event":"init","conversation_id":"c","init":{}}',
+    '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"PONG"}}',
+    '{"event":"result","result":{"status":"SUCCESS","response":"PONG\\n","usage":{"input_tokens":10,"output_tokens":2,"thinking_tokens":1,"cache_read_tokens":3}}}',
+  ].join('\n')
+  const r = parse('agy', ok, '', 0)
+  expect([r.isOk, r.text]).toEqual([true, 'PONG'])
+  expect(r.usage).toEqual({ inputTokens: 10, outputTokens: 2, cachedTokens: 3, reasoningTokens: 1 })
+  const bad = '{"event":"result","result":{"status":"ERROR","response":"","error":"stream input message is missing the \\"event\\" field"}}'
+  const f = parse('agy', bad, '', 0)
+  expect(f.isOk).toBe(false)
+  expect(f.error).toContain('missing the "event" field')
+  // the plain json of an older run still reads
+  expect(parse('agy', '{"status":"SUCCESS","response":"old"}', '', 0).text).toBe('old')
+})
+
+test('H-01 a real Antigravity request never puts the prompt in its arguments', async ($, on) => {
+  const legacy = LEGACY()
+  const w = world({ ...legacy, 'config-v2': { ...legacy['config-v2'], antigravity: { isConnected: true, isEnabled: true, model: 'gem-pro-high' } } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle(60)
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'antigravity', prompt: 'secret-prompt-text' } as never)
+  const run = w.ran.filter(x => x.argv.includes('--output-format')).pop()!
+  expect(run.argv.join(' ')).not.toContain('secret-prompt-text')
+  expect(run.stdin).toContain('secret-prompt-text')
+})
+
+// L-01..L-03: limit states, any account-wide window binds, groups by whole words
+const LW = (usedPercent: number, group?: string, resetsAt?: number) => ({ label: 'w', usedPercent, group, resetsAt })
+test('L-01 one spent account-wide window makes the provider exhausted', () => {
+  const now = 1_000_000
+  expect(limitState({ at: now, state: 'ok', source: 's', windows: [LW(100), LW(10)] }, now)).toBe('exhausted')
+  expect(limitState({ at: now, state: 'ok', source: 's', windows: [LW(99, undefined, now - 1), LW(10)] }, now)).toBe('available')
+  expect(limitState({ at: now, state: 'ok', source: 's', windows: [LW(85), LW(10)] }, now)).toBe('limited')
+  // one model group spent, another free: the provider is limited, not exhausted, the spent group's models are
+  const two = { at: now, state: 'ok' as const, source: 's', windows: [LW(100, 'Gemini Models'), LW(0, 'Claude and GPT models')] }
+  expect(limitState(two, now)).toBe('limited')
+  expect(limitState(two, now, { id: 'gemini-4-argon' })).toBe('exhausted')
+  expect(limitState(two, now, { id: 'claude-sonnet-5' })).toBe('available')
+  expect(limitState(two, now, { id: 'gpt-oss-120b' })).toBe('available')
+  expect(limitState({ ...two, windows: [LW(100, 'Gemini Models'), LW(99, 'Claude and GPT models')] }, now)).toBe('exhausted')
+})
+
+test('L-02 unknown, stale and unsupported limits are never read as free or spent', () => {
+  const now = 10_000_000
+  expect(limitState(undefined, now)).toBe('unknown')
+  expect(limitState({ at: now, state: 'error', source: 's', error: 'x' }, now)).toBe('unknown')
+  expect(limitState({ at: now, state: 'unsupported', source: 's' }, now)).toBe('unsupported')
+  expect(limitState({ at: now - 31 * 60_000, state: 'ok', source: 's', windows: [LW(100)] }, now)).toBe('stale')
+  expect(limitState({ at: now, state: 'ok', source: 's', windows: [] }, now)).toBe('unknown')
+  // a model no window covers is unknown, not available
+  expect(limitState({ at: now, state: 'ok', source: 's', windows: [LW(5, 'Gemini Models')] }, now, { id: 'claude-sonnet-5' })).toBe('unknown')
+})
+
+test('L-03 a model group covers a model by whole words only', () => {
+  expect(groupCovers('Gemini Models', { id: 'gemini-4-argon' })).toBe(true)
+  expect(groupCovers('Claude and GPT models', { id: 'gpt-oss-120b' })).toBe(true)
+  expect(groupCovers('Claude and GPT models', { id: 'gemini-4-argon' })).toBe(false)
+  expect(groupCovers('Gemini 3 Pro', { id: 'gemini-4-argon', label: 'Gemini 4 Argon' })).toBe(false)
+  expect(groupCovers('Pro', { id: 'promo-model' })).toBe(false)
+  expect(groupCovers(undefined, { id: 'anything' })).toBe(true)
+})
+
+// R-01: a routing rule must suit the task
+const VISION_MODELS = {
+  chatgpt: { models: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol', inputModalities: ['text', 'image'], source: 'codex' }], isLoading: false, loadedAt: 1_000_000 },
+  deepseek: { models: [{ id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat', inputModalities: ['text'], source: 'models.dev' }], isLoading: false, loadedAt: 1_000_000 },
+}
+test('R-01 a vision rule set to a model without image input is skipped, and the reason names it', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': VISION_MODELS, 'hub-settings-v1': { ...DEFAULT_SETTINGS, routes: { vision: { provider: 'deepseek', model: 'deepseek/deepseek-chat' } } } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'vision', prompt: 'q', preview: true } as never))
+  expect(r).toContain('deepseek/deepseek-chat does not report image-input')
+  expect(r).not.toContain('Provider: DeepSeek')
+})
+
+test('R-01 a rule naming a model the provider does not offer is skipped', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': VISION_MODELS, 'hub-settings-v1': { ...DEFAULT_SETTINGS, routes: { general: { provider: 'deepseek', model: 'deepseek/gone' } } } })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', task: 'general', prompt: 'q', preview: true } as never))
+  expect(r).toContain('DeepSeek does not offer deepseek/gone')
+})
+
+// S-01: heavy work is not stepped down
+test('S-01 heavy work with no model that serves it is refused, not sent to a weaker level', async ($, on) => {
+  const only = { deepseek: { models: [{ id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat', reasoning: false, source: 'models.dev' }], isLoading: false, loadedAt: 1_000_000 } }
+  const w = world({ 'config-v2': { deepseek: { isConnected: true, isEnabled: true } }, 'keys-v1': { deepseek: 'sk-plain-abcdef1234567890' }, 'hub-models-v2': only })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', level: 'heavy', prompt: 'q', preview: true } as never))
+  expect(r).toContain('heavy work is not stepped down')
+  expect(r).not.toContain('Provider: DeepSeek')
+})
+
+// M-03 / L-02: rows a reload or an earlier session left behind
+test('M-03 jobs on another AI left running by a reload end as failed, and free their slots', () => {
+  const row = (id: string, extra: object = {}) => ({ id, title: id, level: 'light' as const, runner: 'other-ai' as const, state: 'running' as const, startedAt: 1, session: 's1', ...extra })
+  const rows = [row('lost'), row('here'), row('sub', { runner: 'subagent' }), row('done', { state: 'done', summary: 'answer' })]
+  const out = settleRows(rows, 's1', id => id === 'here', 9)!
+  expect(out.map(j => j.state)).toEqual(['failed', 'running', 'running', 'done'])
+  expect(out[0]!.summary).toBe(LOST_IN_RELOAD)
+  expect(out[0]!.endedAt).toBe(9)
+  // nothing to change: the same rows, no write
+  expect(settleRows([row('here')], 's1', () => true, 9)).toBeUndefined()
+  // an earlier session's finished row keeps no piece of its answer; the hub's own notes stay
+  const later = settleRows([row('done', { state: 'done', summary: 'answer' }), row('n', { state: 'failed', summary: 'note', isNote: true })], 's2', () => true, 9)!
+  expect(later[0]!.summary).toContain('earlier session')
+  expect(later[1]!.summary).toBe('note')
+})
+
+test('L-02 a job of an earlier session shows no piece of its result in the next one', async ($, on) => {
+  const w = world({ ...LEGACY(), 'hub-models-v2': LEVEL_MODELS })
+  w.answerText = 'SECRET piece of an answer'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ ...(START('Mine') as object), level: 'light', provider: 'chatgpt' } as never)
+  await settle()
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status' } as never))).toContain('SECRET')
+  w.session = 's2'
+  await $.session.start({ cwd: 'C:\\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const status = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__job_status' } as never))
+  expect(status).not.toContain('SECRET')
+  expect(status).toContain('earlier session')
+})
+
+test('M-01 a relay delegation that never ends is stopped at its time limit, and says what it left', async ($, on) => {
+  const w = RELAY_WORLD()
+  DELEGATE(w)
+  w.hangRelay = true
+  w.instantTimeout = true
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'fix the bug', repo: 'C:\proj' } as never))
+  expect(r).toContain('stopped after 30 minutes without finishing')
+  expect(r).not.toContain('relay completed')
+  expect((w.store['hub-activity-v1'] as { state: string }[]).pop()?.state).toBe('error')
+})
+
+test('L-01w a run kept in one session is, after a /clear, checked against the new session folder', async ($, on) => {
+  const w = world(LEGACY())
+  DELEGATE(w)
+  w.workAfter = { 'src/x.ts': [' M', 'x2'] }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Allow', 'Keep for later']
+  const first = JSON.stringify(await $.tool.call(WRITE as never))
+  const id = /run (run-\d+-[0-9a-f]{16})/.exec(first)?.[1] ?? ''
+  expect(id).not.toBe('')
+  // the same module, a new session in another folder
+  w.session = 's2'
+  await $.session.start({ cwd: 'C:\elsewhere', surface: 'desktop', isInteractive: true })
+  await settle()
+  w.answers = ['Apply']
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__apply_changes', run: id } as never))
+  expect(r).toContain("which is not this session's folder")
+  expect(w.applied).toBeUndefined()
+})
+
+test('H-04 every CLI the hub starts is told its depth, and a hub inside one sends nothing on', async ($, on) => {
+  const w = world(LEGACY())
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q' } as never)
+  const run = w.ran.filter(x => x.argv[1] === 'exec').pop()!
+  expect(run.env?.JERVIS_HUB_DEPTH).toBe('1')
+  expect(run.env?.JERVIS_HUB_PARENT).toMatch(/.+/)
+  // the same hub, started inside such an agent
+  w.envVars = { JERVIS_HUB_DEPTH: '1' }
+  const before = w.ran.length
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', prompt: 'q2' } as never))
+  expect(r).toContain('sends nothing on')
+  expect(w.ran.slice(before).some(x => x.argv[1] === 'exec')).toBe(false)
+})
+
+test('H-04 a delegation from a hub inside an agent a hub started is refused before anything runs', async ($, on) => {
+  const w = RELAY_WORLD()
+  DELEGATE(w)
+  w.envVars = { JERVIS_HUB_DEPTH: '1' }
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const d = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__delegate_ai', provider: 'antigravity', brief: 'fix the bug', repo: 'C:\proj' } as never))
+  expect(d).toContain('sends nothing on')
+  expect(w.ran.some(x => x.argv.includes('--brief'))).toBe(false)
+})
+
+test('R-02 with smart routing off, a vision request never falls back to a model without image input', async ($, on) => {
+  const w = world({ ...FALLBACK(), 'hub-models-v2': VISION_MODELS, 'hub-settings-v1': { ...DEFAULT_SETTINGS, fallback: true, maxFallbacks: 1, smartRouting: false } })
+  w.execOk = false
+  w.execOut = AT_LIMIT
+  w.answer = 'Allow once'
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__ask_ai', provider: 'chatgpt', task: 'vision', prompt: 'what is in the image?' } as never))
+  expect(w.ran.some(x => x.argv.includes('run'))).toBe(false)
+  expect(r).not.toContain('answer from opencode')
+})
+
+test('C-01 a comparison names each ready provider it left out, and why', async ($, on) => {
+  const only = { ...LEVEL_MODELS, deepseek: { models: [{ id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat', reasoning: false, source: 'models.dev' }], isLoading: false, loadedAt: 1_000_000 } }
+  const w = world({ ...LEGACY(), 'hub-models-v2': only })
+  engine(on, w)
+  await $.session.start({ cwd: 'C:\proj', surface: 'desktop', isInteractive: true })
+  await settle()
+  const r = JSON.stringify(await $.tool.call({ tool: 'mcp__ai-subscriptions__compare_ai', prompt: 'which?', level: 'heavy' } as never))
+  expect(r).toContain('Left out: DeepSeek')
 })

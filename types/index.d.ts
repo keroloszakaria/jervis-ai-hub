@@ -191,6 +191,10 @@ export type Job = {
   tokens?: { input: number; output: number }
   /** the person cleared it from the band */
   isCleared?: boolean
+  /** the session that started it */
+  session?: string
+  /** the summary is the hub's own note (why it ended), not a piece of the result */
+  isNote?: boolean
 }
 
 /** How far a running request has got, as its CLI's output shows; kept for this session only. */

@@ -3,7 +3,7 @@
 // writes, the refs it reads before and after. CI runs it on Linux, Windows and
 // macOS. Run it by hand with: npx -y tsx@4.19.2 ci/real-gitguard.ts
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -19,6 +19,7 @@ const $ = {
       writeFileSync(path, text)
     },
     exists: async (path: string) => existsSync(path),
+    read: async (path: string) => readFileSync(path, 'utf8'),
   },
   process: {
     run: async (argv: string[], opts?: { timeoutMs?: number; stdin?: string }) => {
@@ -96,6 +97,12 @@ try {
   const moved = refChanges(before, await snapshot($, repo))
   check('a commit made past the guard is found', moved.some(c => c.startsWith('HEAD moved')), moved.join('\n'))
 
+  // a bare repository and the .git folder are repositories too: their refs are read and guarded
+  const bare = await snapshot($, remote)
+  check('a bare repository is read as one, with its refs', bare.isRepo && !bare.failed && Object.keys(bare.refs).some(r => r === 'refs/heads/main'), JSON.stringify(bare))
+  const dotGit = await snapshot($, join(repo, '.git'))
+  check('the .git folder is read as the repository', dotGit.isRepo && !dotGit.failed && Boolean(dotGit.head), JSON.stringify(dotGit))
+
   const plain = join(root, 'plain')
   mkdirSync(plain)
   const none = await snapshot($, plain)
@@ -112,7 +119,7 @@ try {
   writeFileSync(join(repo, 'a.txt'), 'three\n')
   mkdirSync(join(repo, 'new dir'))
   writeFileSync(join(repo, 'new dir', 'n.txt'), 'n\n')
-  const w2 = await workState($, sub)
+  const w2 = await workState($, sub, w1)
   const files = w1 && w2 ? changedFiles(w1, w2) : []
   check(
     'the hub lists the files changed since it looked, from any subfolder, and nothing else',
@@ -120,6 +127,16 @@ try {
     JSON.stringify({ files, w1, w2 }),
   )
   check('a folder outside any repository has no working tree to read', (await workState($, plain)) === undefined)
+
+  // a run that adds a filter to the repository's config: the hub's git does not run it, and says why
+  const marker = join(root, 'filter-ran').replace(/\\/g, '/')
+  git(repo, ['config', 'filter.evil.clean', `sh -c 'echo ran > "${marker}"; cat'`])
+  writeFileSync(join(repo, '.gitattributes'), '*.txt filter=evil\n')
+  writeFileSync(join(repo, 'a.txt'), 'four\n')
+  const w3 = await workState($, sub, w2)
+  check('a filter added during the run is never run by the hub, and the list says why', Boolean(w3?.isGuardChanged) && !existsSync(marker), JSON.stringify({ w3, ran: existsSync(marker) }))
+  git(repo, ['config', '--unset', 'filter.evil.clean'])
+  rmSync(join(repo, '.gitattributes'))
 } finally {
   rmSync(root, { recursive: true, force: true })
 }

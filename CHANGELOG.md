@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.11.0
+
+Core hardening. The full list, with evidence and tests, is in `docs/audits/CORE_HARDENING_AUDIT.md`.
+
+- **Antigravity prompts stay off the command line:** the prompt goes to `agy` on stdin, as a stream-json message, so other programs cannot read it in the process list. Long, multiline and Unicode prompts are sent whole; the old length limit is gone.
+- **Junctions cannot reach outside the project:** a folder inside the project that leads out of it (a Windows junction or a linked folder) is left out of the copy. An Apply through one is refused, including a folder made into one after the copy.
+- **A half-written Apply is put back:** if git fails part way, the files it wrote are restored and the answer says so. If they cannot be restored, the answer names them.
+- **No loops between hubs:** every CLI the hub starts is told it runs under a hub (`JERVIS_HUB_DEPTH`). A hub inside such an agent sends nothing on.
+- **Limits read as they are:** one spent account-wide window means the provider is spent. Model groups match whole words only. Unknown and old readings are never treated as free, and each provider and model has one of these states: available, limited, exhausted, stale, unknown, unsupported.
+- **Routing rules must suit the task:** a rule whose model the provider no longer offers, or whose model lacks what the task needs (image input for vision), is skipped, and the reason names it. A fallback with smart routing off keeps that check.
+- **Heavy work is not stepped down:** with no model that serves heavy work, the request is refused instead of going to a weaker level. Equal picks go the same way every time.
+- **Delegations can be stopped:** a relay delegation has a 30-minute limit and a Stop. A stopped CLI the hub cannot confirm ended is reported as possibly still running.
+- **The hub's own git runs nothing of the repository's:** no fsmonitor hook and no filters. If a run changed `.git/config` or the attributes files, the hub does not run git on the repository again, and says so.
+- **Jobs after a reload:** jobs on another AI that a reload cut off end as failed and free their slots. An earlier session's job results do not show in the next session.
+- **Smaller fixes:**
+  - A bare repository is guarded like any other.
+  - A run kept for later is checked against the folder of the session applying it.
+  - `compare_ai` names each provider it left out.
+  - "Declined" now reads "declined, or nobody could be asked".
+- **Tests:** 17 new regression tests, and new real-git checks for junctions, filters and bare repositories.
+
 ## 0.10.11
 
 The pane in Arabic reads from the right:

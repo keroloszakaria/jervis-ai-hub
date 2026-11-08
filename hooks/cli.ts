@@ -5,8 +5,14 @@ import type { Kind, Mode, Usage } from '../types'
 import { homeDir, joinPath, osName, tempDir } from './platform'
 import type { OsName } from './platform'
 
-/** Windows caps a command line near 32k characters (and other systems cap it too); agy takes its prompt as an argument. */
-export const MAX_ARG_PROMPT = 30_000
+/**
+ * Antigravity's prompt as one stream-json message on stdin, never on its
+ * command line, where other processes on the machine could read it and the
+ * system caps its length.
+ */
+export function agyStdin(prompt: string): string {
+  return `${JSON.stringify({ event: 'user', message: { role: 'user', content: prompt } })}\n`
+}
 
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
 export const clean = (s: string): string => s.replace(ANSI, '').replace(/\r/g, '').trim()
@@ -256,12 +262,16 @@ export function invocation(
     return {
       argv: [
         ...argvOf(path),
+        '--input-format',
+        'stream-json',
         '--output-format',
-        'json',
+        'stream-json',
         ...(model ? ['--model', model] : []),
         ...(mode === 'write' ? ['--mode', 'accept-edits'] : ['--settings', AGY_READ_SETTINGS]),
-        `-p=${prompt}`,
+        // print mode with an empty prompt: the turn comes from stdin
+        '-p=',
       ],
+      stdin: agyStdin(prompt),
     }
   }
   return {
@@ -361,7 +371,9 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
       status = undefined
     }
   } else if (kind === 'agy') {
-    const d = json(lines.join('\n')) ?? json(lines[lines.length - 1] ?? '')
+    // stream-json: the turn's outcome is the `result` event; plain json (older runs, /usage) is the whole output
+    const event = lines.map(l => json(l)).find(d => d?.event === 'result')
+    const d = (event?.result as Record<string, unknown> | undefined) ?? json(lines.join('\n')) ?? json(lines[lines.length - 1] ?? '')
     if (d) {
       if (typeof d.response === 'string') text = d.response.trim()
       if (d.status !== 'SUCCESS') error = typeof d.error === 'string' ? d.error : `status ${String(d.status)}`

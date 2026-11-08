@@ -51,6 +51,34 @@ export async function candidates($: EngineInterface): Promise<string[]> {
 const labelOf = (id: string): string => provider(id)?.label ?? id
 
 /**
+ * Whether a route set by a rule or the default provider can take this request:
+ * the provider is ready, its model (if one is set) is one the provider offers,
+ * and the model reports every capability the task needs. With no model set and
+ * a capability needed, the provider's first model that reports it is used.
+ * Returns the route to run, or why it cannot.
+ */
+export async function validateRoute(
+  $: EngineInterface,
+  r: Route,
+  needs: Capability[],
+  ready?: string[],
+): Promise<{ route: Route } | { problem: string }> {
+  const ok = ready ?? (await candidates($))
+  if (!ok.includes(r.provider)) return { problem: `${labelOf(r.provider)} not ready` }
+  const list = (await read($, models))[r.provider]?.models ?? []
+  if (r.model) {
+    const m = list.find(x => x.id === r.model)
+    if (list.length && !m) return { problem: `${labelOf(r.provider)} does not offer ${r.model}` }
+    const missing = needs.filter(c => !m || hasCapability(m, c) !== true)
+    if (missing.length) return { problem: `${r.model} does not report ${missing.join(', ')}` }
+    return { route: r }
+  }
+  if (!needs.length) return { route: r }
+  const m = list.find(x => needs.every(c => hasCapability(x, c) === true))
+  return m ? { route: { ...r, model: m.id } } : { problem: `no ${labelOf(r.provider)} model reports ${needs.join(', ')}` }
+}
+
+/**
  * With Smart routing on: the default provider's best model for the task when it
  * can take it, else the smart pick over every ready provider, with the reason
  * naming the default it passed over.
@@ -58,7 +86,7 @@ const labelOf = (id: string): string => provider(id)?.label ?? id
 export async function smartOrDefault(
   $: EngineInterface,
   task: Task,
-  opts: { needs?: Capability[]; level?: Level } = {},
+  opts: { needs?: Capability[]; level?: Level; strictLevel?: boolean } = {},
 ): Promise<SmartPick | { reason: string }> {
   const d = (await read($, settings)).defaultProvider
   if (!d) return smartPick($, task, opts)
@@ -81,6 +109,7 @@ export async function route(
   needs: Capability[] = task === 'vision' ? ['image-input'] : [],
   level?: Level,
   isTaskNamed = true,
+  strictLevel?: boolean,
 ): Promise<{ route?: Route; reason: string }> {
   const { routes, profile } = await activeRoutes($)
   const ready = await candidates($)
@@ -89,13 +118,14 @@ export async function route(
   const kind = `${profile === 'global' ? 'routing rule' : 'project rule'} for ${task}`
   const skipped: string[] = []
   if (rule) {
-    if (ready.includes(rule.provider)) return { route: rule, reason: kind }
-    skipped.push(`${kind}: ${labelOf(rule.provider)} not ready`)
+    const v = await validateRoute($, rule, needs, ready)
+    if ('route' in v) return { route: v.route, reason: kind }
+    skipped.push(`${kind}: ${v.problem}`)
   }
   const said = (reason: string): string => (skipped.length ? `${reason} (skipped ${skipped.join('; ')})` : reason)
   const s = await read($, settings)
   if (s.smartRouting !== false) {
-    const pick = await smartOrDefault($, task, { needs, level })
+    const pick = await smartOrDefault($, task, { needs, level, strictLevel })
     return 'route' in pick ? { route: pick.route, reason: said(pick.reason) } : { reason: said(pick.reason) }
   }
   const all = await read($, models)
@@ -143,9 +173,13 @@ export async function askWithFallback(
     if (tried.length - 1 >= s.maxFallbacks) break
     if (tried.includes(id)) continue
     // that provider's best model for the task, skipping one whose models are all at their limit
+    const needs: Capability[] = task === 'vision' ? ['image-input'] : []
     const pick = s.smartRouting !== false ? await smartPick($, task ?? 'general', { only: id, level }) : undefined
     if (pick && !('route' in pick)) continue
-    const best = pick ? (pick as SmartPick).route : undefined
+    // with smart routing off, the fallback still needs a model that can take the task
+    const plain = pick ? undefined : await validateRoute($, { provider: id }, needs)
+    if (plain && !('route' in plain)) continue
+    const best = pick ? (pick as SmartPick).route : plain && 'route' in plain ? plain.route : undefined
     const model = best?.model
     const effort = best?.effort
     // the person chose the first provider, not this one: with a folder its files, without one the prompt, are asked about first

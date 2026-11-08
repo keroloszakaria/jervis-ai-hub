@@ -3,7 +3,7 @@
 // included), compare, apply, and an apply refused after the folder changed.
 // CI runs it on Linux, Windows and macOS. By hand: npx -y tsx@4.19.2 ci/real-workspace.ts
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -36,6 +36,10 @@ const $ = {
       writeFileSync(path, text)
     },
     exists: async (path: string) => existsSync(path),
+    stat: async (path: string) => {
+      const st = statSync(path)
+      return { kind: st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'other', size: st.size, mtimeMs: st.mtimeMs, isLink: lstatSync(path).isSymbolicLink(), realPath: realpathSync.native(path) }
+    },
     list: async (path: string) =>
       readdirSync(path, { withFileTypes: true }).map(d => ({ name: d.name, kind: d.isDirectory() ? 'dir' : d.isFile() ? 'file' : 'other', size: 0, mtimeMs: 0, isLink: d.isSymbolicLink() })),
   },
@@ -323,6 +327,60 @@ async function main(): Promise<void> {
       await removeRun($, run6.root)
     } else {
       console.log('skip links: this system would not make a symbolic link here (on Windows that needs Developer Mode)')
+    }
+
+    // a junction (Windows) or linked folder that git lists as a plain folder: nothing under it is copied
+    const jroot = join(root, 'junction-folder')
+    mkdirSync(jroot)
+    writeFileSync(join(jroot, 'ok.txt'), 'ok\n')
+    const jsecret = join(root, 'junction-secret')
+    mkdirSync(jsecret)
+    writeFileSync(join(jsecret, 's.txt'), 'S\n')
+    let canJunction = true
+    try {
+      symlinkSync(jsecret, join(jroot, 'out'), 'junction')
+    } catch {
+      canJunction = false
+    }
+    if (canJunction) {
+      const runJ = await makeCopy($, { folder: jroot, shown: jroot, provider: 'chatgpt' })
+      check('a file reached through a junction is not in the copy', !existsSync(join(runJ.tree, 'out', 's.txt')) && runJ.leftOut.some(l => l.path.startsWith('out') && l.why === 'link'), JSON.stringify(runJ.leftOut))
+      await removeRun($, runJ.root)
+
+      // a folder made into a junction after the copy: the Apply is refused and the file outside is untouched
+      const jroot2 = join(root, 'junction-later')
+      mkdirSync(join(jroot2, 'sub'), { recursive: true })
+      writeFileSync(join(jroot2, 'sub', 'f.txt'), 'a\n')
+      const runJ2 = await makeCopy($, { folder: jroot2, shown: jroot2, provider: 'chatgpt' })
+      writeFileSync(join(runJ2.tree, 'sub', 'f.txt'), 'b\n')
+      const cJ2 = await compare($, runJ2)
+      const outside = join(root, 'junction-outside')
+      mkdirSync(outside)
+      writeFileSync(join(outside, 'f.txt'), 'a\n')
+      renameSync(join(jroot2, 'sub'), join(jroot2, 'sub-was'))
+      symlinkSync(outside, join(jroot2, 'sub'), 'junction')
+      const rJ2 = await applyRun($, runJ2, cJ2)
+      check('an Apply through a folder made into a junction is refused, and the file outside is untouched', !rJ2.isOk && JSON.stringify(rJ2).includes('leads out of the project') && readFileSync(join(outside, 'f.txt'), 'utf8') === 'a\n', JSON.stringify(rJ2))
+      await removeRun($, runJ2.root)
+    } else {
+      console.log('skip junctions: this system would not make one here')
+    }
+
+    // a write that fails half way (a folder git cannot write): what was written is put back, and the answer says so
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      const half = join(root, 'half')
+      mkdirSync(join(half, 'z'), { recursive: true })
+      writeFileSync(join(half, 'a.txt'), 'a\n')
+      writeFileSync(join(half, 'z', 'b.txt'), 'b\n')
+      const runH = await makeCopy($, { folder: half, shown: half, provider: 'chatgpt' })
+      writeFileSync(join(runH.tree, 'a.txt'), 'A\n')
+      writeFileSync(join(runH.tree, 'z', 'b.txt'), 'B\n')
+      const cH = await compare($, runH)
+      chmodSync(join(half, 'z'), 0o555)
+      const rH = await applyRun($, runH, cH)
+      chmodSync(join(half, 'z'), 0o755)
+      check('a half-written Apply is put back and never called applied', !rH.isOk && readFileSync(join(half, 'a.txt'), 'utf8') === 'a\n' && readFileSync(join(half, 'z', 'b.txt'), 'utf8') === 'b\n', JSON.stringify(rH))
+      await removeRun($, runH.root)
     }
 
     // the hub's own git config, changed by someone, is written again before use: no filter runs

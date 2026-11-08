@@ -117,6 +117,16 @@ const RUN_ID = /^run-(\d+)-[0-9a-f]{16}$/
 const RUNS_KEY = 'hub-work-runs-v1'
 /** this session's runs: what a later reading of the store must agree with */
 const known = new Map<string, RunRecord>()
+/** the session that made each of those runs: a /clear keeps the module, not the session */
+const madeIn = new Map<string, string>()
+
+async function sessionNow($: EngineInterface): Promise<string> {
+  try {
+    return await $.session.id()
+  } catch {
+    return ''
+  }
+}
 
 // byte-exact copies, no hooks, no background work, paths as they are
 const GIT_FLAGS = [
@@ -227,6 +237,58 @@ function staged(out: string): { mode: string; blob: string; path: string }[] {
 
 const isLinkMode = (mode: string) => mode === '120000' || mode === '160000'
 
+const sameCase = (os: OsName, p: string): string => {
+  const x = p.replace(/[\\/]+$/, '')
+  return os === 'windows' ? x.replace(/\//g, '\\').toLowerCase() : x
+}
+
+/**
+ * The folders (relative, with `/`) on these paths whose real place is outside
+ * `folder`: a Windows junction or a linked folder, which git lists as a plain
+ * folder. A file under one is not the folder's, so it is neither copied nor
+ * written by an Apply. A folder whose place cannot be read counts as outside.
+ */
+export async function foldersLeadingOut($: EngineInterface, folder: string, paths: string[]): Promise<Set<string>> {
+  const os = await osName($)
+  const sep = os === 'windows' ? '\\' : '/'
+  let rootReal: string
+  try {
+    rootReal = (await $.fs.stat(folder, { resolve: true })).realPath ?? folder
+  } catch {
+    rootReal = folder
+  }
+  const root = sameCase(os, rootReal)
+  const dirs = new Set<string>()
+  for (const p of paths) {
+    const parts = p.split('/')
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'))
+  }
+  const out = new Set<string>()
+  for (const d of [...dirs].sort((a, b) => a.length - b.length)) {
+    // under a folder already found to lead out
+    if ([...out].some(o => d.startsWith(`${o}/`))) {
+      out.add(d)
+      continue
+    }
+    let real: string | undefined
+    try {
+      const st = await $.fs.stat(joinPath(os, folder, ...d.split('/')), { resolve: true })
+      real = st.realPath
+    } catch {
+      real = undefined
+    }
+    const r = real === undefined ? undefined : sameCase(os, real)
+    if (r === undefined || (r !== root && !r.startsWith(root + sep))) out.add(d)
+  }
+  return out
+}
+
+const underAny = (p: string, dirs: Set<string>): boolean => {
+  const parts = p.split('/')
+  for (let i = 1; i < parts.length; i++) if (dirs.has(parts.slice(0, i).join('/'))) return true
+  return false
+}
+
 async function dropFromIndex($: EngineInterface, gitDir: string, folder: string, paths: string[]): Promise<void> {
   if (!paths.length) return
   // the index only: --force-remove never touches the folder's files
@@ -252,8 +314,12 @@ export async function makeCopy($: EngineInterface, a: { folder: string; shown?: 
     const scanDir = joinPath(os, root, 'scan')
     must(await hubGit($, scanDir, undefined, ['init', '-q', '--bare', scanDir], { cwd: await homeDir($) }), 'starting the scan')
     await sealGit($, scanDir)
-    const files = await filesOf($, a.folder, gitDir)
-    const leftOut: LeftOut[] = files.filter(isLeftOut).map(path => ({ path, why: 'name' }))
+    const listed = await filesOf($, a.folder, gitDir)
+    // files reached through a folder that leads out of the project (a junction) are not the project's
+    const outside = await foldersLeadingOut($, a.folder, listed)
+    const files = listed.filter(p => !underAny(p, outside))
+    const leftOut: LeftOut[] = listed.filter(p => underAny(p, outside)).map(path => ({ path, why: 'link' as const }))
+    leftOut.push(...files.filter(isLeftOut).map(path => ({ path, why: 'name' as const })))
     const keep = files.filter(p => !isLeftOut(p))
     if (keep.length > MAX_COPY_FILES) {
       throw new Error(`${a.folder} has ${keep.length} files to copy, more than the ${MAX_COPY_FILES} a copy may hold`)
@@ -444,11 +510,26 @@ export async function applyRun($: EngineInterface, run: WorkRun, c: Compared): P
   const links = c.changes.filter(x => x.isLink).map(x => x.path)
   if (links.length) return { isOk: false, why: 'the run made links or submodules, which the hub never applies, so nothing was applied', files: links }
   try {
+    // checked again now: a folder made into a junction since the copy would carry the write out of the project
+    const outside = await foldersLeadingOut($, run.folder, c.changes.map(x => x.path))
+    const out = c.changes.filter(x => underAny(x.path, outside)).map(x => x.path)
+    if (out.length) return { isOk: false, why: 'these files are reached through a folder that leads out of the project (a junction or a link), so nothing was applied', files: out }
     const since = await changedSince($, run, c.changes)
     if (since.length) return { isOk: false, why: 'these files changed in the folder after the copy was made, so nothing was applied', files: since }
     await sealGit($, run.git)
     const r = await hubGit($, run.git, run.folder, ['apply', '--binary', '--whitespace=nowarn', c.patchPath], { cwd: run.folder })
-    if (r.code !== 0) return { isOk: false, why: `git could not apply the changes (${(r.err || r.out).trim().slice(0, 300)}); nothing was applied` }
+    if (r.code !== 0) {
+      const why = (r.err || r.out).trim().slice(0, 300)
+      // git checks every file before it writes, but a write can still fail half way (a locked file): find what it wrote
+      const written = await differsFrom($, run, run.base, c.changes, x => x.status === 'A').catch(() => undefined)
+      if (written === undefined) return { isOk: false, isMixed: true, why: `git could not apply the changes (${why}), and the hub could not check what it wrote: check these files`, files: c.changes.map(x => x.path) }
+      if (!written.length) return { isOk: false, why: `git could not apply the changes (${why}); nothing was applied` }
+      await sealGit($, run.git)
+      const undo = await hubGit($, run.git, run.folder, ['apply', '-R', '--binary', '--whitespace=nowarn', ...written.map(p => `--include=${p}`), c.patchPath], { cwd: run.folder })
+      const left = undo.code === 0 ? await differsFrom($, run, run.base, c.changes, x => x.status === 'A').catch(() => written) : written
+      if (!left.length) return { isOk: false, why: `git could not apply the changes (${why}) after it had written some files; those were put back, so nothing was applied`, files: written }
+      return { isOk: false, isMixed: true, why: `git could not apply the changes (${why}) after it had written some files, and these could not be put back: check them`, files: left }
+    }
   } catch (error) {
     return { isOk: false, why: `${errText(error)}; nothing was applied` }
   }
@@ -483,20 +564,35 @@ async function storedRuns($: EngineInterface): Promise<Record<string, RunRecord>
   }
 }
 
+// every read-change-write of the kept runs goes through this queue, one at a
+// time, so two runs ending together never lose each other's record
+let runsQueue: Promise<unknown> = Promise.resolve()
+function withRuns<T>(job: () => Promise<T>): Promise<T> {
+  const next = runsQueue.then(job, job)
+  runsQueue = next.catch(() => undefined)
+  return next
+}
+
 async function remember($: EngineInterface, r: RunRecord): Promise<void> {
   known.set(r.id, r)
-  const all = await storedRuns($)
-  all[r.id] = r
-  await $.store.set(RUNS_KEY, all)
+  madeIn.set(r.id, await sessionNow($))
+  await withRuns(async () => {
+    const all = await storedRuns($)
+    all[r.id] = r
+    await $.store.set(RUNS_KEY, all)
+  })
 }
 
 async function forget($: EngineInterface, id: string): Promise<void> {
   known.delete(id)
-  const all = await storedRuns($)
-  if (id in all) {
-    delete all[id]
-    await $.store.set(RUNS_KEY, all)
-  }
+  madeIn.delete(id)
+  await withRuns(async () => {
+    const all = await storedRuns($)
+    if (id in all) {
+      delete all[id]
+      await $.store.set(RUNS_KEY, all)
+    }
+  })
 }
 
 /** Whether a stored record is one the hub could have written: its id, an absolute folder, a git tree id, a known provider. */
@@ -538,8 +634,8 @@ export async function readRun($: EngineInterface, id: string): Promise<WorkRun |
 }
 
 /** Whether this session made the run (its record is in the hub's memory, not only in the store). */
-export function isThisSessions(id: string): boolean {
-  return known.has(id)
+export async function isThisSessions($: EngineInterface, id: string): Promise<boolean> {
+  return known.has(id) && madeIn.get(id) === (await sessionNow($))
 }
 
 /** Whether `path` is a run's own folder: directly under the work root and named as a run. */
@@ -600,13 +696,16 @@ export async function cleanOldRuns($: EngineInterface, now: number, maxAgeMs = 7
     const scan = joinPath(os, dir, 'scan')
     if (age > LEFT_BEHIND_MS && (await $.fs.exists(scan).catch(() => false))) await rmTree($, os, scan)
   }
-  const all = await storedRuns($)
   const there = new Set(entries.map(e => e.name))
-  const stale = Object.keys(all).filter(id => !there.has(id) || !RUN_ID.test(id))
-  if (stale.length) {
-    for (const id of stale) delete all[id]
-    await $.store.set(RUNS_KEY, all).catch(() => undefined)
-  }
+  await withRuns(async () => {
+    const all = await storedRuns($)
+    // a record made since the folder was listed (by another session) is not stale
+    const stale = Object.keys(all).filter(id => !RUN_ID.test(id) || (!there.has(id) && now - Number(RUN_ID.exec(id)![1]) > LEFT_BEHIND_MS))
+    if (stale.length) {
+      for (const id of stale) delete all[id]
+      await $.store.set(RUNS_KEY, all).catch(() => undefined)
+    }
+  })
 }
 
 /** The kept runs, newest first. */

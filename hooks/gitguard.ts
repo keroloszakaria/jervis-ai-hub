@@ -40,9 +40,12 @@ export const GUARD_HOOKS: Record<string, string> = {
 /** The URL scheme every push is rewritten to: git has no helper for it, so the push fails. */
 export const BLOCKED_SCHEME = 'jervis-blocked://'
 
+/** Read-only git on the user's repository: no fsmonitor hook, no paging, paths as they are. */
+export const SAFE_GIT = ['-c', 'core.fsmonitor=false', '-c', 'core.quotepath=false', '-c', 'core.untrackedCache=false', '--no-pager']
+
 async function git($: EngineInterface, repo: string, args: string[]): Promise<string | undefined> {
   try {
-    const r = await $.process.run(['git', '-C', repo, ...args], { timeoutMs: 20_000 })
+    const r = await $.process.run(['git', ...SAFE_GIT, '-C', repo, ...args], { timeoutMs: 20_000 })
     return r.exitCode === 0 ? r.stdout : undefined
   } catch {
     return undefined
@@ -86,11 +89,11 @@ export async function gitAbove($: EngineInterface, os: OsName, dir: string): Pro
 export async function snapshot($: EngineInterface, repo: string): Promise<RefSnapshot> {
   let probe: { exitCode: number; stdout: string; stderr: string } | undefined
   try {
-    probe = await $.process.run(['git', '-C', repo, 'rev-parse', '--is-inside-work-tree'], { timeoutMs: 20_000 })
+    probe = await $.process.run(['git', ...SAFE_GIT, '-C', repo, 'rev-parse', '--is-inside-work-tree'], { timeoutMs: 20_000 })
   } catch {
     probe = undefined
   }
-  if (probe?.exitCode === 0 && probe.stdout.trim() !== 'true') return { isRepo: false, refs: {} }
+  // "false": a bare repository or inside .git, which still has refs to guard
   if (probe && probe.exitCode !== 0 && /not a git repository/i.test(probe.stderr)) return { isRepo: false, refs: {} }
   if (!probe || probe.exitCode !== 0) {
     if (!(await gitAbove($, await osName($), repo))) return { isRepo: false, refs: {} }
@@ -176,7 +179,34 @@ export async function guardEnv($: EngineInterface, os: OsName): Promise<Record<s
 }
 
 /** The working tree's changed and untracked files, each with its status and content hash. */
-export type WorkState = { files: Record<string, string>; isPartial: boolean }
+export type WorkState = {
+  files: Record<string, string>
+  isPartial: boolean
+  /** the repository's own config and attributes as read before git ran: a change to them can make git run a program */
+  guard?: string
+  /** the config or attributes changed since the reading this one was compared with, so git was not run again */
+  isGuardChanged?: boolean
+}
+
+/** Files of the repository that can make git run a program (a filter, a hook command): read as text, never by git. */
+const GUARD_FILES = ['config', 'info/attributes']
+
+async function guardOf($: EngineInterface, top: string): Promise<string> {
+  const gitDir = (await git($, top, ['rev-parse', '--absolute-git-dir']))?.trim()
+  if (!gitDir) return ''
+  const os = await osName($)
+  const parts: string[] = []
+  for (const f of [...GUARD_FILES.map(x => joinPath(os, gitDir, ...x.split('/'))), joinPath(os, top, '.gitattributes')]) {
+    let text = ''
+    try {
+      text = await $.fs.read(f)
+    } catch {
+      text = '<none>'
+    }
+    parts.push(`${f}\u0000${text}`)
+  }
+  return parts.join('\u0001')
+}
 
 /** At most this many changed files are compared; past it the list is marked partial. */
 export const MAX_WORK_FILES = 5000
@@ -202,9 +232,12 @@ export function parseStatus(out: string): Record<string, string> {
  * changed again is told apart from one already changed before. Undefined
  * outside a repository or when git cannot say.
  */
-export async function workState($: EngineInterface, repo: string): Promise<WorkState | undefined> {
+export async function workState($: EngineInterface, repo: string, before?: WorkState): Promise<WorkState | undefined> {
   const top = (await git($, repo, ['rev-parse', '--show-toplevel']))?.trim()
   if (!top) return undefined
+  const guard = await guardOf($, top)
+  // a run that changed what git runs (a new filter in .git/config): the hub's git is not run on it
+  if (before?.guard !== undefined && before.guard !== guard) return { files: before.files, isPartial: before.isPartial, guard, isGuardChanged: true }
   const out = await git($, top, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
   if (out === undefined) return undefined
   const status = parseStatus(out)
@@ -215,7 +248,7 @@ export async function workState($: EngineInterface, repo: string): Promise<WorkS
   let hashes: string[] = []
   if (present.length) {
     try {
-      const r = await $.process.run(['git', '-C', top, 'hash-object', '--stdin-paths'], { stdin: `${present.join('\n')}\n`, timeoutMs: 60_000 })
+      const r = await $.process.run(['git', ...SAFE_GIT, '-C', top, 'hash-object', '--no-filters', '--stdin-paths'], { stdin: `${present.join('\n')}\n`, timeoutMs: 60_000 })
       if (r.exitCode === 0) hashes = r.stdout.split(/\r?\n/)
     } catch {
       // statuses alone, below
@@ -224,7 +257,7 @@ export async function workState($: EngineInterface, repo: string): Promise<WorkS
   const hashOf = new Map(present.map((p, i) => [p, hashes[i] ?? ''] as const))
   const files: Record<string, string> = {}
   for (const p of listed) files[p] = `${status[p]}:${hashOf.get(p) ?? ''}`
-  return { files, isPartial }
+  return { files, isPartial, guard }
 }
 
 /** The files whose status or content differs between two readings, sorted. */
@@ -239,6 +272,7 @@ export function changedFiles(before: WorkState, after: WorkState): string[] {
 /** The changed files in words, for the answer: listed by the hub, never by the agent. */
 export function filesLine(before: WorkState | undefined, after: WorkState | undefined): string {
   if (!before || !after) return 'The hub cannot list the changed files here (not a git repository): check the folder yourself.'
+  if (after.isGuardChanged) return "The repository's git config or attributes (.git/config, .git/info/attributes or .gitattributes) changed during the run, so the hub did not run git on it again and cannot list the changed files: check those files, and the folder, yourself before running git."
   const files = changedFiles(before, after)
   const partial = before.isPartial || after.isPartial ? ` The working tree has more than ${MAX_WORK_FILES} changed files, so this list may be short.` : ''
   if (!files.length) return `No files changed (as read by the hub's own git).${partial}`
