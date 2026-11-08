@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "hub": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/dist/jervis-mcp.mjs"],
+      "env": { "JERVIS_HUB_HOST": "antigravity" }
+    }
+  }
+}

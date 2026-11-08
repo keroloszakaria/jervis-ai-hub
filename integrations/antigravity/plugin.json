@@ -1,0 +1,15 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "jervis-ai-hub",
+  "displayName": "Jervis AI Hub",
+  "description": "Ask and compare the other AIs you connected (your own subscriptions and keys), run background jobs on them, and read their models and limits.",
+  "version": "0.11.0",
+  "author": { "name": "Jervis Tech" },
+  "repository": "https://github.com/keroloszakaria/jervis-ai-hub",
+  "license": "MIT",
+  "keywords": ["ai", "routing", "compare", "limits"],
+  "suggestedPrompts": [
+    "Use Jervis AI Hub to compare two other models on this question.",
+    "Use Jervis AI Hub to show the limits of my connected providers."
+  ]
+}
