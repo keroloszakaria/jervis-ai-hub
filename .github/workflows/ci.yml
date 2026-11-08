@@ -47,3 +47,24 @@ jobs:
         run: npx -y tsx@4.19.2 ci/real-gitguard.ts
       - name: Workspace copy with real git
         run: npx -y tsx@4.19.2 ci/real-workspace.ts
+
+  # the MCP server the Codex and Antigravity plugins start: built from the same modules, checked over stdio
+  mcp:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build the MCP server
+        run: npx -y esbuild@0.24.0 hosts/mcp/server.ts --bundle --platform=node --target=node20 --format=esm --alias:claude-code=./hosts/mcp/claude-code-shim.ts --outfile=dist/jervis-mcp.mjs --legal-comments=none --log-level=warning
+      - name: The committed bundle is the one the source builds
+        if: matrix.os == 'ubuntu-latest'
+        run: git diff --exit-code -- dist/jervis-mcp.mjs
+      - name: MCP acceptance (no provider is called)
+        run: npx -y tsx@4.19.2 ci/mcp-smoke.ts

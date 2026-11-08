@@ -19,6 +19,7 @@ Core hardening. The full list, with evidence and tests, is in `docs/audits/CORE_
   - A run kept for later is checked against the folder of the session applying it.
   - `compare_ai` names each provider it left out.
   - "Declined" now reads "declined, or nobody could be asked".
+- **One core, more hosts:** the tools are described and run in one place (`hooks/tools.ts`), and `dist/jervis-mcp.mjs` serves them over MCP (stdio) from the same modules, for the Codex and Antigravity plugins. There nobody can be asked for an approval, so project reads, writes and delegation are not sent, and kept changes are applied only from the person's own terminal (`node dist/jervis-mcp.mjs apply <run>`). `ci/mcp-smoke.ts` checks the server over stdio on every OS.
 - **Tests:** 17 new regression tests, and new real-git checks for junctions, filters and bare repositories.
 
 ## 0.10.11
