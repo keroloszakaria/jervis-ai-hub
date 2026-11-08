@@ -61,7 +61,8 @@ async function main(): Promise<void> {
     check('every tool is listed', want.every(n => names.includes(n)), names.join(','))
     check('read-only tools say so', list.tools.find(t => t.name === 'get_limits')?.annotations?.readOnlyHint === true && list.tools.find(t => t.name === 'ask_ai')?.annotations?.readOnlyHint === false)
 
-    const providers = text(await tool(s, 'list_providers'))
+    // all: a CI machine has no provider connected, and the default list shows connected ones only
+    const providers = text(await tool(s, 'list_providers', { all: true }))
     check('Codex, the host, is marked as never sent requests', /chatgpt:.*the agent this hub runs inside/.test(providers), providers)
     const self = await tool(s, 'ask_ai', { provider: 'chatgpt', prompt: 'ping' })
     check('a request to the host’s own provider is refused', isError(self) && text(self).includes('runs inside'), text(self))
