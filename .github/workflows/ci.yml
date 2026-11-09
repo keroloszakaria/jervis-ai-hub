@@ -20,11 +20,6 @@ jobs:
           node-version: 20
       - name: Install Claude Code (pinned)
         run: npm install -g @anthropic-ai/claude-code@2.1.317
-      - name: Type-check against the vendored declarations
-        run: |
-          # the vendored file must come from the Claude Code version installed above
-          head -1 vendor/claude-code/index.d.ts | grep -qx '// Written by Claude Code 2.1.317.' || { echo 'vendor/claude-code/index.d.ts is not from Claude Code 2.1.317; replace it (vendor/README.md)'; exit 1; }
-          npx -y -p typescript@5.6.3 tsc -p tsconfig.ci.json
       - name: Validate the plugin
         run: claude plugin validate .
       - name: Run the tests

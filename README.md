@@ -33,8 +33,6 @@ claude plugin install ai-subscriptions --marketplace keroloszakaria/jervis-ai-hu
 
 In the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `keroloszakaria/jervis-ai-hub`, then Add plugin.
 
-This repository is private: installing needs read access to it on GitHub and a git credential for github.com on your machine (an SSH key, or `gh auth login` then `gh auth setup-git`).
-
 Open the pane with `/ai-providers`.
 
 How to use every part of it: the [user manual](docs/USER_MANUAL.md) ([Arabic](docs/ar/USER_MANUAL.md)).
@@ -42,7 +40,7 @@ How to use every part of it: the [user manual](docs/USER_MANUAL.md) ([Arabic](do
 ## Developing
 
 - Type checking extends `.claude-plugin/types/tsconfig.json`, which Claude Code writes the first time it loads the mod (the folder is gitignored). Load the mod once, for example with `claude --plugin-dir <this folder>`, then run `npx -p typescript tsc -p .`.
-- Tests: `claude plugin test .` and `claude plugin validate .`. CI (`.github/workflows/ci.yml`) runs both on every push and pull request, and type-checks with `tsconfig.ci.json` against a copy of Claude Code's declarations in `vendor/` (see `vendor/README.md`).
+- Tests: `claude plugin test .` and `claude plugin validate .`. CI (`.github/workflows/ci.yml`) runs both on every push and pull request. CI does not type-check: Claude Code's declarations are written only on a machine that loads the mod, and they are not this project's to publish, so run the type check locally before a release.
 - The git guard is also checked with real git: `npx -y tsx@4.19.2 ci/real-gitguard.ts`, and the workspace copy with `npx -y tsx@4.19.2 ci/real-workspace.ts`. A `.jervisignore` in a project's root (`.gitignore` patterns) names more files to leave out of the copy. Before an Apply, the **Review changes** pane shows each changed file's diff. CI runs both on Linux, Windows and macOS.
 - The CLIs' isolation rules are checked with the real, signed-in CLIs by hand (it sends real prompts): `npx -y tsx@4.19.2 ci/real-cli.ts --opencode-model opencode/beam-free`. Name `opencode`, `agy` or `codex` to check some of them. It exits 0 only when every check passed (1 failed, 3 incomplete) and writes an evidence file under `~/.claude/jervis-ai-hub/evidence`.
 - Don't load a development copy and the installed plugin in the same session: both register the same tools and pane.

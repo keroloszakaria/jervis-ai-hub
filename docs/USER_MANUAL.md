@@ -40,8 +40,6 @@ This manual is for version 0.11.0.
 
 ## Install, update, remove
 
-The repository is private. To install you need read access to it on GitHub, and a git credential for github.com on your machine (an SSH key, or `gh auth login` then `gh auth setup-git`).
-
 **Install** at the prompt of a terminal session:
 
 ```
