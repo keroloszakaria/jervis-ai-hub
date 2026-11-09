@@ -42,8 +42,6 @@ Jervis AI Hub هو mod لـ Claude Code. بيوصّل اشتراكات الذك�
 
 ## التثبيت والتحديث والإزالة
 
-الـ repository خاص (private). عشان تثبّت لازم يكون عندك صلاحية قراءة عليه في GitHub، وgit credential لـ github.com على جهازك (SSH key، أو `gh auth login` وبعدها `gh auth setup-git`).
-
 **التثبيت** من الـ prompt في جلسة terminal:
 
 </div>

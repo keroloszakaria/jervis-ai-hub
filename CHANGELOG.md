@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **The repository is public:** anyone can install the mod with the command in the README; no GitHub access is needed.
+- **Claude Code's declarations are no longer in the repository:** `vendor/claude-code/index.d.ts` belonged to Claude Code, not to this project. CI no longer type-checks; run the type check locally, where Claude Code writes the declarations.
+- **User manual** in English and Arabic: `docs/USER_MANUAL.md`, `docs/ar/USER_MANUAL.md`.
+
 ## 0.11.0
 
 Core hardening. The full list, with evidence and tests, is in `docs/audits/CORE_HARDENING_AUDIT.md`.
