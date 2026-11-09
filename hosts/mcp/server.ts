@@ -26,7 +26,7 @@ import { STORE, loadPersisted } from '../../hooks/state'
 import { type Host, TOOL_NAMES, callTool, toolSpecs } from '../../hooks/tools'
 import { type Asker, nodeEngine } from './engine'
 
-const VERSION = '0.11.0'
+const VERSION = '0.11.1'
 const PROTOCOL = '2025-06-18'
 
 const config = atom({ plugin: 'ai-subscriptions', key: 'config' } as const, {}, { shape: 'cfg-3' })
@@ -49,6 +49,10 @@ async function start($: Engine, folder: string): Promise<void> {
   if (!(await $.store.get(STORE.config))) for (const id of ['chatgpt', 'antigravity', 'opencode-free']) await connect(e, id).catch(() => undefined)
   await settleJobs(e).catch(() => undefined)
   await checkAllAuth(e).catch(() => undefined)
+  // Discover Claude on upgrades too, while honoring a saved disconnect or disable.
+  if (hostOf() === 'codex' && !(await read(e, config))['claude-code']) {
+    await connect(e, 'claude-code', false).catch(() => undefined)
+  }
   const cfg = (await read(e, config)) as Record<string, { isConnected?: boolean }>
   const lists = (await read(e, models)) as Record<string, never>
   const now = Date.now()
@@ -59,6 +63,7 @@ type Rpc = { jsonrpc: '2.0'; id?: number | string | null; method?: string; param
 
 async function serve(): Promise<void> {
   const host = hostOf()
+  process.env.JERVIS_HUB_HOST = host
   const $ = nodeEngine({ log: t => process.stderr.write(`[jervis] ${t}\n`) })
   const e = $ as never
   // a host may start the server in the plugin's own folder, which is no project

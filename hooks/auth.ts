@@ -7,7 +7,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { AuthState } from '../types'
-import { argvOf, clean, errText, exe, onPath } from './cli'
+import { argvOf, clean, errText, exe, onPath, sandboxDir } from './cli'
 import { type OsName, osName } from './platform'
 import type { ProviderEntry } from './registry'
 import { STORE } from './state'
@@ -272,6 +272,7 @@ export async function checkAuth(
   p: ProviderEntry,
 ): Promise<{ state: AuthState; message: string }> {
   const path = await exe($, p.kind)
+  if (!path && p.kind === 'claude-code') return { state: 'not-installed', message: 'The Claude Code CLI is not installed.' }
   if (!path) return { state: 'not-installed', message: `The ${p.kind === 'codex' ? 'Codex' : p.kind === 'agy' ? 'agy' : 'OpenCode'} CLI is not installed.` }
   try {
     if (p.kind === 'codex') {
@@ -280,6 +281,13 @@ export async function checkAuth(
       return /logged in/i.test(text) && !/not logged in/i.test(text)
         ? { state: 'authenticated', message: text.split('\n')[0] ?? 'Signed in' }
         : { state: 'signed-out', message: 'Not signed in to Codex.' }
+    }
+    if (p.kind === 'claude-code') {
+      const r = await $.process.run([...argvOf(path), 'auth', 'status'], { cwd: await sandboxDir($), timeoutMs: 20_000 })
+      const auth = JSON.parse(clean(r.stdout)) as { loggedIn?: boolean; authMethod?: string; apiProvider?: string }
+      return r.exitCode === 0 && auth.loggedIn && auth.authMethod === 'claude.ai' && auth.apiProvider === 'firstParty'
+        ? { state: 'authenticated', message: 'Signed in to Claude Code with a Claude account.' }
+        : { state: 'signed-out', message: 'Run claude auth login to sign in to your Claude account.' }
     }
     if (p.kind === 'agy') {
       const r = await $.process.run([...argvOf(path), 'models'], { timeoutMs: 60_000 })

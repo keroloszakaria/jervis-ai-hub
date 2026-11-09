@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.1 (Codex)
+
+- Codex automatically connects Claude Code CLI when it is installed and signed in to a Claude account. Use `claude-code` for self-contained prompts.
+
 ## 0.11.0
 
 Core hardening. The full list, with evidence and tests, is in `docs/audits/CORE_HARDENING_AUDIT.md`.

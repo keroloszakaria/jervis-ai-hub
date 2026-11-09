@@ -17,7 +17,11 @@ A Claude Code mod that connects your other AI subscriptions and API keys (ChatGP
 
 Windows, macOS and Linux. Linux needs `secret-tool` (libsecret) and `zenity` or `kdialog`. The providers' own CLIs (`codex`, `agy`, `opencode`) must be installed and signed in for the subscriptions you connect.
 
-## Install
+## Install in Codex
+
+Install from the [`codex` branch](docs/integrations/CODEX.md). Jervis AI Hub automatically links a locally installed Claude Code CLI when you have signed in to a Claude account.
+
+## Install in Claude Code
 
 At the prompt of a terminal session:
 
@@ -32,8 +36,6 @@ claude plugin install ai-subscriptions --marketplace keroloszakaria/jervis-ai-hu
 ```
 
 In the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `keroloszakaria/jervis-ai-hub`, then Add plugin.
-
-This repository is private: installing needs read access to it on GitHub and a git credential for github.com on your machine (an SSH key, or `gh auth login` then `gh auth setup-git`).
 
 Open the pane with `/ai-providers`.
 

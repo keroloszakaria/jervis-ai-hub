@@ -61,6 +61,9 @@ export async function askTool(
   const p = provider(providerId)
   if (!p) return { isOk: false, text: `Unknown provider "${providerId}".` }
 
+  if (p.kind === 'claude-code' && (a.cwd || a.mode === 'write')) {
+    return { isOk: false, text: 'Claude Code CLI accepts self-contained prompts only.' }
+  }
   if (a.preview) return { isOk: true, text: await preview($, { ...a, providerId, model, effort, why }) }
 
   if (a.mode === 'write') {

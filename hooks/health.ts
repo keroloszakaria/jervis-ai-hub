@@ -94,7 +94,7 @@ async function signInCodex($: EngineInterface, id: string, path: string): Promis
 }
 
 /** Connects one provider by its own official method, then checks it. */
-export async function connect($: EngineInterface, id: string): Promise<void> {
+export async function connect($: EngineInterface, id: string, allowTest = true): Promise<void> {
   const p = provider(id)
   if (!p) return
   const path = await exe($, p.kind)
@@ -119,7 +119,7 @@ export async function connect($: EngineInterface, id: string): Promise<void> {
         return
       }
     }
-    auth = await checkAuth($, p)
+    if (p.kind !== 'claude-code') auth = await checkAuth($, p)
   }
   const at = await $.clock.now()
   await setHealth($, id, h => ({ ...h, auth: auth.state, authMessage: auth.message, authCheckedAt: at, lastTest: undefined }))
@@ -133,7 +133,7 @@ export async function connect($: EngineInterface, id: string): Promise<void> {
   await refreshModels($, id)
   void refreshLimits($, id).catch(() => undefined)
   await note($, id, undefined)
-  if ((await read($, settings)).verifyOnConnect) await test($, id)
+  if (allowTest && (await read($, settings)).verifyOnConnect) await test($, id)
 }
 
 /** Removes the hub's link; for a subscription it never signs out of the CLI itself. */

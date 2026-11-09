@@ -1,6 +1,6 @@
 ---
 name: jervis-ai-hub
-description: Use when the user asks to consult, get a second opinion from, compare, or hand a read-only question to another AI they connected in Jervis AI Hub (Antigravity, OpenCode, or a saved API key), or asks about those providers' models and limits.
+description: Use when the user asks to consult, get a second opinion from, compare, or hand a read-only question to another AI they connected in Jervis AI Hub (Claude Code CLI, Antigravity, OpenCode, or a saved API key), or asks about those providers' models and limits.
 ---
 
 # Jervis AI Hub from Codex
@@ -12,7 +12,7 @@ The `hub` MCP server of this plugin sends prompts to the other AIs the user conn
 - `start_job` for a longer piece in the background, then `job_status` with its id to read the result, and `stop_job` to end it.
 - `list_models`, `get_limits` and `preview_route` read what the providers report. They send no prompt. Never state a quota or limit the tools did not return.
 
-The other AI does not see this conversation: put all the context in the prompt.
+Put the context needed to answer in the prompt. For `claude-code`, pass a self-contained prompt without `cwd`.
 
 ## What does not work from Codex
 

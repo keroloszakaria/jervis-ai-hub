@@ -41,9 +41,9 @@ export async function hopEnv($: EngineInterface, parent: string): Promise<Record
 }
 
 /** The host the hub runs inside, as the host's plugin set it: its own provider is never sent requests from here. */
-const HOST_PROVIDER: Record<string, string> = { codex: 'chatgpt', antigravity: 'antigravity' }
+const HOST_PROVIDER: Record<string, string> = { codex: 'chatgpt', antigravity: 'antigravity', 'claude-code': 'claude-code' }
 
-/** The provider that is the agent this hub runs inside, or undefined in Claude Code. */
+/** The provider that is the agent this hub runs inside, with the native Claude Code plugin as the default host. */
 export async function selfProvider($: EngineInterface): Promise<string | undefined> {
   let v: string | undefined
   try {
@@ -51,5 +51,5 @@ export async function selfProvider($: EngineInterface): Promise<string | undefin
   } catch {
     v = undefined
   }
-  return v ? HOST_PROVIDER[v] : undefined
+  return HOST_PROVIDER[v ?? 'claude-code']
 }

@@ -8,17 +8,16 @@ Status: **partially ready**. Read-only requests, comparisons, background jobs, m
 
 You need Codex CLI with plugin support (checked with 0.167.0-alpha.3.2) and Node 20 or newer on `PATH`.
 
-From a clone of this repository, on the `codex` branch:
-
 ```bash
-codex plugin marketplace add .
-```
-
-```bash
+codex plugin marketplace add https://github.com/keroloszakaria/jervis-ai-hub.git --ref codex
 codex plugin add jervis-ai-hub@jervis-ai-hub
 ```
 
-Then start a new Codex session. `codex mcp list` shows the server as `hub`.
+From a local checkout of `codex`, use `codex plugin marketplace add .` to register the checkout.
+
+If you installed from GitHub before, run `codex plugin marketplace upgrade jervis-ai-hub` followed by `codex plugin add jervis-ai-hub@jervis-ai-hub`.
+
+Start a new Codex session after installation or upgrade. `codex mcp list` shows the server as `hub`.
 
 ## Remove
 
@@ -67,8 +66,10 @@ Turning the project-access question off in the hub's settings lets `cwd` reads g
 ## Data and keys
 
 - The server keeps its setup in the plugin data folder Codex gives it (`PLUGIN_DATA`), or `JERVIS_HUB_HOME` when set, in one file readable by the user only. It holds no keys: API keys stay in the OS's secure storage.
-- Sign-ins are the providers' own CLIs (Antigravity, OpenCode). The hub reads no browser cookies or session tokens.
+- Sign-ins use the providers' own CLIs (Claude Code, Antigravity, OpenCode). The hub reads no browser cookies or session tokens.
 - The first start links the official sign-ins that already work. It only checks them and sends no prompt.
+- Codex automatically links the `claude-code` provider when Claude Code CLI is installed and `claude auth status` reports a signed-in Claude account. This works with an existing Hub configuration too. If needed, run `claude auth login` and then start a new Codex session.
+- The provider accepts self-contained prompts through Claude Code CLI 2.1.317 or a later 2.x version. It uses the account’s default model unless you specify a model alias or ID. Run `/usage` in Claude Code to check plan limits.
 
 ## Checks
 

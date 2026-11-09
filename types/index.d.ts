@@ -3,7 +3,7 @@
 export type Mode = 'read' | 'write'
 
 /** How a provider is reached. */
-export type Kind = 'codex' | 'agy' | 'opencode-free' | 'opencode-key'
+export type Kind = 'codex' | 'claude-code' | 'agy' | 'opencode-free' | 'opencode-key'
 export type AuthMethod = 'subscription' | 'api-key' | 'free'
 
 /** The tasks the routing engine has a default for. */

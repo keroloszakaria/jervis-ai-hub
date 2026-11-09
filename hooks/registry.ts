@@ -46,6 +46,16 @@ export const PROVIDERS: ProviderEntry[] = [
     billing: 'subscription',
   },
   {
+    id: 'claude-code',
+    label: 'Claude Code CLI',
+    kind: 'claude-code',
+    auth: 'subscription',
+    hint: 'Your Claude account, already signed in through the official Claude Code CLI',
+    canWrite: false,
+    reportsUsage: true,
+    billing: 'subscription',
+  },
+  {
     id: 'opencode-free',
     label: 'OpenCode Zen (free)',
     kind: 'opencode-free',

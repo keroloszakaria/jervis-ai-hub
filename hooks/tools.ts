@@ -288,6 +288,7 @@ async function providersText($: EngineInterface, isAll: boolean): Promise<string
 }
 
 async function modelsText($: EngineInterface, only?: string): Promise<string> {
+  if (only === 'claude-code') return 'Claude Code CLI uses the account’s default model unless you supply a model alias or ID.'
   const lists = await read($, models)
   const out: string[] = []
   for (const [id, list] of Object.entries(lists)) {

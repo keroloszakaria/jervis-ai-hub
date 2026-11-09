@@ -304,6 +304,7 @@ async function readKey($: EngineInterface, id: string, r: KeyReader, now: number
 export function unsupportedReason(id: string): string {
   const p = provider(id)
   if (!p) return 'Unknown provider'
+  if (p.kind === 'claude-code') return 'See /usage in Claude Code for subscription limits.'
   if (p.kind === 'opencode-free') return 'Free models are rate-limited by OpenCode; it reports no quota.'
   return 'This provider has no documented endpoint for a key’s balance; see its console.'
 }

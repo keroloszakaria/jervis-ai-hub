@@ -284,7 +284,12 @@ async function execute($: EngineInterface, a: RequestArgs): Promise<RequestResul
   // a hub inside an agent a hub started sends nothing on: no loops
   const loop = await hopRefusal($)
   if (loop) return fail(loop, 'policy')
-  await checkUnknownSignIns($, [a.providerId])
+  if (p.kind === 'claude-code') {
+    if (a.cwd || a.mode !== 'read') return fail('Claude Code CLI accepts self-contained prompts only.', 'policy')
+    if (c?.isConnected && c.isEnabled) await checkSignIn($, p.id)
+  } else {
+    await checkUnknownSignIns($, [a.providerId])
+  }
   const blocked = await readiness($, a.providerId)
   if (blocked) return fail(blocked)
   const path = await exe($, p.kind)

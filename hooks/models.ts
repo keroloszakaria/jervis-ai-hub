@@ -213,7 +213,7 @@ export const isModelListStale = (list: ModelList | undefined, now: number): bool
 /** Refreshes one provider's model list; keeps the old list on failure. */
 export async function refreshModels($: EngineInterface, id: string): Promise<void> {
   const p = provider(id)
-  if (!p) return
+  if (!p || p.kind === 'claude-code') return // Claude Code selects the account's default unless a model is supplied.
   const current = (await read($, models))[id]
   if (current?.isLoading) return
   await setModels($, id, m => ({ ...m, isLoading: true, error: undefined }))

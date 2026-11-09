@@ -120,6 +120,8 @@ export function writeIsBounded(providerId: string): boolean {
 
 /** Why a write on this provider is refused, or undefined when it may be asked about. */
 export async function unboundedRefusal($: EngineInterface, providerId: string): Promise<string | undefined> {
+  const entry = provider(providerId)
+  if (entry?.canWrite === false) return `${entry.label} accepts self-contained prompts only.`
   if (writeIsBounded(providerId) || (await read($, settings)).allowUnboundedWrites) return undefined
   const label = provider(providerId)?.label ?? providerId
   return `${label} writes are not held to the folder: it could change any file you can. They are off; turn on "Allow writes not held to the folder (Antigravity)" in Jervis AI Hub → Settings → Privacy to allow them. Nothing was sent.`

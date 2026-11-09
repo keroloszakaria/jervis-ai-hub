@@ -331,6 +331,7 @@ var RETRYABLE = /* @__PURE__ */ new Set(["limit", "network", "unavailable"]);
 var mayFallBack = (kind) => kind !== void 0 && RETRYABLE.has(kind);
 async function exe($, kind) {
   const os = await osName($);
+  if (kind === "claude-code") return claudeExe($, os);
   if (os !== "windows") {
     const home = await homeDir($);
     const name = kind === "codex" ? "codex" : kind === "agy" ? "agy" : "opencode";
@@ -354,6 +355,25 @@ async function exe($, kind) {
   }
   if (kind === "agy") return await firstExisting($, [`${local}\\agy\\bin\\agy.exe`]) ?? onPath($, "agy");
   return await firstExisting($, [`${local}\\Programs\\@opencodedesktop\\resources\\opencode-cli.exe`]) ?? onPath($, "opencode");
+}
+async function claudeExe($, os) {
+  const installed = await onPath($, "claude");
+  if (installed) return installed;
+  if (os !== "windows") return firstExisting($, [joinPath(os, await homeDir($), ".local", "bin", "claude")]);
+  const native = await firstExisting($, [joinPath(os, await homeDir($), ".local", "bin", "claude.exe")]);
+  if (native) return native;
+  const local = await $.env.get("LOCALAPPDATA");
+  if (!local) return void 0;
+  const root = joinPath(os, local, "Claude-Data", "claude_pzs8sxrjxfjjc", "claude-code");
+  const versions2 = (await $.fs.list(root).catch(() => [])).filter((v) => v.kind === "dir" && /^\d+\.\d+\.\d+$/.test(v.name));
+  versions2.sort((a, b) => b.name.localeCompare(a.name, "en", { numeric: true }));
+  for (const version2 of versions2) {
+    const dir = joinPath(os, root, version2.name);
+    const builds = (await $.fs.list(dir).catch(() => [])).filter((build) => build.kind === "dir");
+    const path = await firstExisting($, builds.map((build) => joinPath(os, dir, build.name, "claude.exe")));
+    if (path) return path;
+  }
+  return void 0;
 }
 var dirOf = (path) => path.replace(/[\\/][^\\/]*$/, "");
 async function sandboxDir($) {
@@ -396,6 +416,24 @@ function invocation(kind, path, prompt, mode, model, effort, codexOs) {
     const sandbox = codexOs ? codexProfileArgs(codexOs, mode) : ["-s", mode === "write" ? "workspace-write" : "read-only"];
     return {
       argv: [...argvOf(path), "exec", "--json", "--skip-git-repo-check", ...sandbox, ...model ? ["-m", model] : [], ...effort ? ["-c", `model_reasoning_effort="${effort}"`] : [], "-"],
+      stdin: prompt
+    };
+  }
+  if (kind === "claude-code") {
+    return {
+      argv: [
+        ...argvOf(path),
+        "--print",
+        "--output-format",
+        "json",
+        "--no-session-persistence",
+        "--safe-mode",
+        "--restricted",
+        "--strict-mcp-config",
+        "--tools=",
+        "--disallowedTools=*",
+        ...model ? ["--model", model] : []
+      ],
       stdin: prompt
     };
   }
@@ -491,6 +529,21 @@ function parse(kind, stdout, stderr, exitCode) {
       error = void 0;
       status2 = void 0;
     }
+  } else if (kind === "claude-code") {
+    const result = json(lines.join("\n"));
+    if (result?.type === "result") {
+      text = typeof result.result === "string" ? result.result.trim() : "";
+      if (result.is_error || result.subtype !== "success") {
+        error = text || (Array.isArray(result.errors) ? result.errors.join("; ") : "") || String(result.subtype ?? "request failed");
+        status2 = statusIn(result);
+      }
+      if (result.usage && typeof result.usage === "object") {
+        const u = result.usage;
+        usage = { inputTokens: num3(u.input_tokens), outputTokens: num3(u.output_tokens), cachedTokens: num3(u.cache_read_input_tokens) };
+      }
+    } else {
+      error = clean(stderr || stdout) || "Claude Code returned no result";
+    }
   } else if (kind === "agy") {
     const event = lines.map((l) => json(l)).find((d2) => d2?.event === "result");
     const d = event?.result ?? json(lines.join("\n")) ?? json(lines[lines.length - 1] ?? "");
@@ -537,6 +590,7 @@ function parseVersion(text) {
 var TESTED = {
   "opencode-free": { label: "OpenCode", modes: ["read", "write"], isOk: (v) => v[0] === 2, range: "2.x" },
   "opencode-key": { label: "OpenCode", modes: ["read", "write"], isOk: (v) => v[0] === 2, range: "2.x" },
+  "claude-code": { label: "Claude Code", modes: ["read"], isOk: (v) => v[0] === 2 && (v[1] > 1 || v[1] === 1 && v[2] >= 317), range: "2.1.317 or a later 2.x" },
   agy: { label: "Antigravity", modes: ["read"], isOk: (v) => v[0] === 1 && v[1] >= 5, range: "1.5 or a later 1.x" }
 };
 var versions = /* @__PURE__ */ new Map();
@@ -558,7 +612,7 @@ async function isolationProblem($, kind, path, mode) {
   const what = mode === "read" ? "read-only" : "write";
   return `${t.label} ${v ? v.join(".") : "(its version could not be read)"} is not a version whose ${what} limits the hub has checked (${t.range}), so nothing was sent. Install ${t.label} ${t.range}.`;
 }
-var CHECKED = { "opencode-free": "2.1.4", "opencode-key": "2.1.4", agy: "1.5.3" };
+var CHECKED = { "opencode-free": "2.1.4", "opencode-key": "2.1.4", "claude-code": "2.1.317", agy: "1.5.3" };
 function versionNote(kind, versionText) {
   const t = TESTED[kind];
   if (!t) return void 0;
@@ -850,7 +904,7 @@ async function hopRefusal($) {
 async function hopEnv($, parent) {
   return { [DEPTH_VAR]: String(await hopDepth($) + 1), [PARENT_VAR]: parent };
 }
-var HOST_PROVIDER = { codex: "chatgpt", antigravity: "antigravity" };
+var HOST_PROVIDER = { codex: "chatgpt", antigravity: "antigravity", "claude-code": "claude-code" };
 async function selfProvider($) {
   let v;
   try {
@@ -858,7 +912,7 @@ async function selfProvider($) {
   } catch {
     v = void 0;
   }
-  return v ? HOST_PROVIDER[v] : void 0;
+  return HOST_PROVIDER[v ?? "claude-code"];
 }
 
 // hooks/auth.ts
@@ -1027,12 +1081,18 @@ async function revealForRequest($, id) {
 }
 async function checkAuth($, p) {
   const path = await exe($, p.kind);
+  if (!path && p.kind === "claude-code") return { state: "not-installed", message: "The Claude Code CLI is not installed." };
   if (!path) return { state: "not-installed", message: `The ${p.kind === "codex" ? "Codex" : p.kind === "agy" ? "agy" : "OpenCode"} CLI is not installed.` };
   try {
     if (p.kind === "codex") {
       const r = await $.process.run([...argvOf(path), "login", "status"], { timeoutMs: 3e4 });
       const text = clean(r.stdout + "\n" + r.stderr);
       return /logged in/i.test(text) && !/not logged in/i.test(text) ? { state: "authenticated", message: text.split("\n")[0] ?? "Signed in" } : { state: "signed-out", message: "Not signed in to Codex." };
+    }
+    if (p.kind === "claude-code") {
+      const r = await $.process.run([...argvOf(path), "auth", "status"], { cwd: await sandboxDir($), timeoutMs: 2e4 });
+      const auth = JSON.parse(clean(r.stdout));
+      return r.exitCode === 0 && auth.loggedIn && auth.authMethod === "claude.ai" && auth.apiProvider === "firstParty" ? { state: "authenticated", message: "Signed in to Claude Code with a Claude account." } : { state: "signed-out", message: "Run claude auth login to sign in to your Claude account." };
     }
     if (p.kind === "agy") {
       const r = await $.process.run([...argvOf(path), "models"], { timeoutMs: 6e4 });
@@ -1068,6 +1128,16 @@ var PROVIDERS = [
     hint: "Your Google Antigravity account, through the official agy CLI",
     canWrite: true,
     relaySkill: "agy-delegate",
+    reportsUsage: true,
+    billing: "subscription"
+  },
+  {
+    id: "claude-code",
+    label: "Claude Code CLI",
+    kind: "claude-code",
+    auth: "subscription",
+    hint: "Your Claude account, already signed in through the official Claude Code CLI",
+    canWrite: false,
     reportsUsage: true,
     billing: "subscription"
   },
@@ -1278,7 +1348,7 @@ var MODELS_TTL_MS = 24 * 60 * 60 * 1e3;
 var isModelListStale = (list, now) => !list?.models.length || list.loadedAt === void 0 || now - list.loadedAt > MODELS_TTL_MS;
 async function refreshModels($, id) {
   const p = provider(id);
-  if (!p) return;
+  if (!p || p.kind === "claude-code") return;
   const current = (await read($, models2))[id];
   if (current?.isLoading) return;
   await setModels($, id, (m) => ({ ...m, isLoading: true, error: void 0 }));
@@ -1552,6 +1622,7 @@ async function readKey($, id, r, now) {
 function unsupportedReason(id) {
   const p = provider(id);
   if (!p) return "Unknown provider";
+  if (p.kind === "claude-code") return "See /usage in Claude Code for subscription limits.";
   if (p.kind === "opencode-free") return "Free models are rate-limited by OpenCode; it reports no quota.";
   return "This provider has no documented endpoint for a key\u2019s balance; see its console.";
 }
@@ -1680,6 +1751,8 @@ function writeIsBounded(providerId) {
   return provider(providerId)?.kind !== "agy";
 }
 async function unboundedRefusal($, providerId) {
+  const entry = provider(providerId);
+  if (entry?.canWrite === false) return `${entry.label} accepts self-contained prompts only.`;
   if (writeIsBounded(providerId) || (await read($, settings4)).allowUnboundedWrites) return void 0;
   const label = provider(providerId)?.label ?? providerId;
   return `${label} writes are not held to the folder: it could change any file you can. They are off; turn on "Allow writes not held to the folder (Antigravity)" in Jervis AI Hub \u2192 Settings \u2192 Privacy to allow them. Nothing was sent.`;
@@ -1853,7 +1926,12 @@ async function execute($, a) {
   if (!p) return fail(`Unknown provider "${a.providerId}".`);
   const loop = await hopRefusal($);
   if (loop) return fail(loop, "policy");
-  await checkUnknownSignIns($, [a.providerId]);
+  if (p.kind === "claude-code") {
+    if (a.cwd || a.mode !== "read") return fail("Claude Code CLI accepts self-contained prompts only.", "policy");
+    if (c?.isConnected && c.isEnabled) await checkSignIn($, p.id);
+  } else {
+    await checkUnknownSignIns($, [a.providerId]);
+  }
   const blocked = await readiness($, a.providerId);
   if (blocked) return fail(blocked);
   const path = await exe($, p.kind);
@@ -3018,6 +3096,9 @@ async function askTool($, a) {
   }
   const p = provider(providerId);
   if (!p) return { isOk: false, text: `Unknown provider "${providerId}".` };
+  if (p.kind === "claude-code" && (a.cwd || a.mode === "write")) {
+    return { isOk: false, text: "Claude Code CLI accepts self-contained prompts only." };
+  }
   if (a.preview) return { isOk: true, text: await preview($, { ...a, providerId, model, effort, why }) };
   if (a.mode === "write") {
     const named = a.cwd ?? await read($, cwd3);
@@ -3366,7 +3447,7 @@ async function signInCodex($, id, path) {
   }
   return true;
 }
-async function connect($, id) {
+async function connect($, id, allowTest = true) {
   const p = provider(id);
   if (!p) return;
   const path = await exe($, p.kind);
@@ -3390,7 +3471,7 @@ async function connect($, id) {
         return;
       }
     }
-    auth = await checkAuth($, p);
+    if (p.kind !== "claude-code") auth = await checkAuth($, p);
   }
   const at = await $.clock.now();
   await setHealth($, id, (h2) => ({ ...h2, auth: auth.state, authMessage: auth.message, authCheckedAt: at, lastTest: void 0 }));
@@ -3403,7 +3484,7 @@ async function connect($, id) {
   await refreshModels($, id);
   void refreshLimits($, id).catch(() => void 0);
   await note($, id, void 0);
-  if ((await read($, settings10)).verifyOnConnect) await test($, id);
+  if (allowTest && (await read($, settings10)).verifyOnConnect) await test($, id);
 }
 
 // hooks/subagents.ts
@@ -3670,6 +3751,7 @@ async function runDiagnostics($) {
   const rows = [];
   const clis = [
     ["codex", "Codex CLI"],
+    ["claude-code", "Claude Code CLI"],
     ["agy", "Antigravity CLI"],
     ["opencode-key", "OpenCode CLI"]
   ];
@@ -3956,6 +4038,7 @@ async function providersText($, isAll) {
   return lines.join("\n");
 }
 async function modelsText($, only) {
+  if (only === "claude-code") return "Claude Code CLI uses the account\u2019s default model unless you supply a model alias or ID.";
   const lists = await read($, models7);
   const out = [];
   for (const [id, list] of Object.entries(lists)) {
@@ -4167,7 +4250,7 @@ function nodeEngine(opts = {}) {
 }
 
 // hosts/mcp/server.ts
-var VERSION = "0.11.0";
+var VERSION = "0.11.1";
 var PROTOCOL = "2025-06-18";
 var config11 = atom({ plugin: "ai-subscriptions", key: "config" }, {}, { shape: "cfg-3" });
 var models8 = atom({ plugin: "ai-subscriptions", key: "models" }, {}, { shape: "m-2" });
@@ -4183,6 +4266,9 @@ async function start($, folder2) {
   if (!await $.store.get(STORE.config)) for (const id of ["chatgpt", "antigravity", "opencode-free"]) await connect(e, id).catch(() => void 0);
   await settleJobs(e).catch(() => void 0);
   await checkAllAuth(e).catch(() => void 0);
+  if (hostOf() === "codex" && !(await read(e, config11))["claude-code"]) {
+    await connect(e, "claude-code", false).catch(() => void 0);
+  }
   const cfg = await read(e, config11);
   const lists = await read(e, models8);
   const now = Date.now();
@@ -4190,6 +4276,7 @@ async function start($, folder2) {
 }
 async function serve() {
   const host = hostOf();
+  process.env.JERVIS_HUB_HOST = host;
   const $ = nodeEngine({ log: (t) => process.stderr.write(`[jervis] ${t}
 `) });
   const e = $;

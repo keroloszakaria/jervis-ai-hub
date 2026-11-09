@@ -21,6 +21,7 @@ export async function runDiagnostics($: EngineInterface): Promise<void> {
   const rows: DiagRow[] = []
   const clis: [Kind, string][] = [
     ['codex', 'Codex CLI'],
+    ['claude-code', 'Claude Code CLI'],
     ['agy', 'Antigravity CLI'],
     ['opencode-key', 'OpenCode CLI'],
   ]

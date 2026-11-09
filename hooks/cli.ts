@@ -139,6 +139,7 @@ export const mayFallBack = (kind: ErrorKind | undefined): boolean => kind !== un
 /** Where a kind's CLI lives on this machine, or undefined when it is not installed. */
 export async function exe($: EngineInterface, kind: Kind): Promise<string | undefined> {
   const os = await osName($)
+  if (kind === 'claude-code') return claudeExe($, os)
   if (os !== 'windows') {
     // the official installers' homes, then Homebrew and the usual bins, then PATH
     const home = await homeDir($)
@@ -170,6 +171,29 @@ export async function exe($: EngineInterface, kind: Kind): Promise<string | unde
     (await firstExisting($, [`${local}\\Programs\\@opencodedesktop\\resources\\opencode-cli.exe`])) ??
     onPath($, 'opencode')
   )
+}
+
+async function claudeExe($: EngineInterface, os: OsName): Promise<string | undefined> {
+  const installed = await onPath($, 'claude')
+  if (installed) return installed
+  if (os !== 'windows') return firstExisting($, [joinPath(os, await homeDir($), '.local', 'bin', 'claude')])
+
+  const native = await firstExisting($, [joinPath(os, await homeDir($), '.local', 'bin', 'claude.exe')])
+  if (native) return native
+
+  // Claude Desktop may leave a PATH shim pointing to a removed version.
+  const local = await $.env.get('LOCALAPPDATA')
+  if (!local) return undefined
+  const root = joinPath(os, local, 'Claude-Data', 'claude_pzs8sxrjxfjjc', 'claude-code')
+  const versions = (await $.fs.list(root).catch(() => [])).filter(v => v.kind === 'dir' && /^\d+\.\d+\.\d+$/.test(v.name))
+  versions.sort((a, b) => b.name.localeCompare(a.name, 'en', { numeric: true }))
+  for (const version of versions) {
+    const dir = joinPath(os, root, version.name)
+    const builds = (await $.fs.list(dir).catch(() => [])).filter(build => build.kind === 'dir')
+    const path = await firstExisting($, builds.map(build => joinPath(os, dir, build.name, 'claude.exe')))
+    if (path) return path
+  }
+  return undefined
 }
 
 export const dirOf = (path: string): string => path.replace(/[\\/][^\\/]*$/, '')
@@ -255,6 +279,17 @@ export function invocation(
     const sandbox = codexOs ? codexProfileArgs(codexOs, mode) : ['-s', mode === 'write' ? 'workspace-write' : 'read-only']
     return {
       argv: [...argvOf(path), 'exec', '--json', '--skip-git-repo-check', ...sandbox, ...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []), '-'],
+      stdin: prompt,
+    }
+  }
+  if (kind === 'claude-code') {
+    return {
+      argv: [
+        ...argvOf(path),
+        '--print', '--output-format', 'json', '--no-session-persistence',
+        '--safe-mode', '--restricted', '--strict-mcp-config', '--tools=', '--disallowedTools=*',
+        ...(model ? ['--model', model] : []),
+      ],
       stdin: prompt,
     }
   }
@@ -370,6 +405,21 @@ export function parse(kind: Kind, stdout: string, stderr: string, exitCode: numb
       error = undefined
       status = undefined
     }
+  } else if (kind === 'claude-code') {
+    const result = json(lines.join('\n'))
+    if (result?.type === 'result') {
+      text = typeof result.result === 'string' ? result.result.trim() : ''
+      if (result.is_error || result.subtype !== 'success') {
+        error = text || (Array.isArray(result.errors) ? result.errors.join('; ') : '') || String(result.subtype ?? 'request failed')
+        status = statusIn(result)
+      }
+      if (result.usage && typeof result.usage === 'object') {
+        const u = result.usage as Record<string, unknown>
+        usage = { inputTokens: num(u.input_tokens), outputTokens: num(u.output_tokens), cachedTokens: num(u.cache_read_input_tokens) }
+      }
+    } else {
+      error = clean(stderr || stdout) || 'Claude Code returned no result'
+    }
   } else if (kind === 'agy') {
     // stream-json: the turn's outcome is the `result` event; plain json (older runs, /usage) is the whole output
     const event = lines.map(l => json(l)).find(d => d?.event === 'result')
@@ -427,6 +477,7 @@ export function parseVersion(text: string): [number, number, number] | undefined
 const TESTED: Partial<Record<Kind, { label: string; modes: Mode[]; isOk: (v: [number, number, number]) => boolean; range: string }>> = {
   'opencode-free': { label: 'OpenCode', modes: ['read', 'write'], isOk: v => v[0] === 2, range: '2.x' },
   'opencode-key': { label: 'OpenCode', modes: ['read', 'write'], isOk: v => v[0] === 2, range: '2.x' },
+  'claude-code': { label: 'Claude Code', modes: ['read'], isOk: v => v[0] === 2 && (v[1] > 1 || (v[1] === 1 && v[2] >= 317)), range: '2.1.317 or a later 2.x' },
   agy: { label: 'Antigravity', modes: ['read'], isOk: v => v[0] === 1 && v[1] >= 5, range: '1.5 or a later 1.x' },
 }
 
@@ -457,7 +508,7 @@ export async function isolationProblem($: EngineInterface, kind: Kind, path: str
 }
 
 /** The exact versions the isolation rules were checked on by hand (SECURITY.md, Checked versions). */
-export const CHECKED: Partial<Record<Kind, string>> = { 'opencode-free': '2.1.4', 'opencode-key': '2.1.4', agy: '1.5.3' }
+export const CHECKED: Partial<Record<Kind, string>> = { 'opencode-free': '2.1.4', 'opencode-key': '2.1.4', 'claude-code': '2.1.317', agy: '1.5.3' }
 
 /**
  * How a CLI's version stands with the hub, for Diagnostics: checked, allowed
